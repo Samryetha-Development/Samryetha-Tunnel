@@ -1,0 +1,14 @@
+{
+  "tunnels": [
+    {
+      "tunnel_id": "web1",
+      "subdomain": "app1",
+      "local_addr": "127.0.0.1:8080"
+    },
+    {
+      "tunnel_id": "api1",
+      "path_prefix": "/u/alice/api",
+      "local_addr": "127.0.0.1:3000"
+    }
+  ]
+}

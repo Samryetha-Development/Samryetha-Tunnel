@@ -1,0 +1,20 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Swift / Xcode
+.build/
+*.xcodeproj/
+xcuserdata/
+DerivedData/
+*.xcworkspace/xcuserdata/
+.DS_Store
+
+# 打包产物（用 TunnelMac/build-app.sh 本地重新生成）
+*.app
+*.dmg
+
+# 本地配置（含真实 token 的一律不进仓库）
+*local*.json
+*.log
+.env

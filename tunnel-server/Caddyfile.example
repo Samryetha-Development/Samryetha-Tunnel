@@ -1,0 +1,9 @@
+# 本地 127.0.0.1:18080，被 Caddy 反代
+frp.xxx.com {
+    reverse_proxy 127.0.0.1:18080
+}
+
+# 泛域名：所有子域名都打到 Rust，由 Rust 按 subdomain 查路由表
+*.frp.xxx.com {
+    reverse_proxy 127.0.0.1:18080
+}
