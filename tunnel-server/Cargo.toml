@@ -1,6 +1,6 @@
 [package]
 name = "tunnel-server"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -12,3 +12,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
 futures = "0.3"
+
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = "9"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+rand = "0.8"
+thiserror = "1"
+dotenvy = "0.15"
