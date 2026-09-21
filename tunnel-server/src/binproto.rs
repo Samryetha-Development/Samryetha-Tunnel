@@ -23,6 +23,8 @@ pub const T_CHUNK: u8 = 0x07;
 pub const T_END: u8 = 0x08;
 pub const T_ABORT: u8 = 0x09;
 pub const T_CLOSE_STREAM: u8 = 0x0A;
+pub const T_MGMT: u8 = 0x0B;
+pub const T_MGMT_RESP: u8 = 0x0C;
 
 fn proto_to_u8(p: &str) -> u8 {
     if p == "tcp" {
@@ -210,6 +212,12 @@ pub fn encode_server(msg: &ServerMsg) -> Vec<u8> {
             w.varint(*stream_id);
             w.bytes(data);
         }
+        ServerMsg::MgmtResp { req_id, status, body } => {
+            w.u8(T_MGMT_RESP);
+            w.varint(*req_id);
+            w.u16(*status);
+            w.bytes(body);
+        }
     }
     w.buf
 }
@@ -271,6 +279,18 @@ pub fn decode_client(d: &[u8]) -> Result<ClientMsg, String> {
             let reason = r.str()?;
             Ok(ClientMsg::Abort { stream_id, reason })
         }
+        T_MGMT => {
+            let req_id = r.varint()?;
+            let method = r.str()?;
+            let path = r.str()?;
+            let body = r.bytes()?;
+            Ok(ClientMsg::Mgmt {
+                req_id,
+                method,
+                path,
+                body,
+            })
+        }
         other => Err(format!("未知帧类型 0x{other:02x}")),
     }
 }
@@ -316,6 +336,18 @@ pub fn encode_client(msg: &ClientMsg) -> Vec<u8> {
             w.u8(T_ABORT);
             w.varint(*stream_id);
             w.str(reason);
+        }
+        ClientMsg::Mgmt {
+            req_id,
+            method,
+            path,
+            body,
+        } => {
+            w.u8(T_MGMT);
+            w.varint(*req_id);
+            w.str(method);
+            w.str(path);
+            w.bytes(body);
         }
     }
     w.buf

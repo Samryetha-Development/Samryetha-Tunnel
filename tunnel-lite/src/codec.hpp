@@ -34,13 +34,17 @@ struct OpenStream {
 
 /// 解析后的服务端消息
 struct InMsg {
-    std::string type; // register_ack | ping | open_stream | close_stream | chunk
+    std::string type; // register_ack | ping | open_stream | close_stream | chunk | mgmt_resp
     bool ackOk = false;
     std::string ackError;
     std::vector<EffectiveT> tunnels;
     OpenStream os;
     uint64_t streamId = 0;
     std::string data;
+    // mgmt_resp
+    uint64_t reqId = 0;
+    int status = 0;
+    std::string respBody;
 };
 
 // ==================== 二进制 写/读 ====================
@@ -140,6 +144,8 @@ enum : uint8_t {
     T_END = 0x08,
     T_ABORT = 0x09,
     T_CLOSE_STREAM = 0x0A,
+    T_MGMT = 0x0B,
+    T_MGMT_RESP = 0x0C,
 };
 
 inline uint8_t protoU8(const std::string &p) { return p == "tcp" ? 1 : 0; }
@@ -258,6 +264,26 @@ inline std::string encAbort(Mode mode, uint64_t sid, const std::string &reason) 
     return o.dump();
 }
 
+inline std::string encMgmt(Mode mode, uint64_t reqId, const std::string &method,
+                           const std::string &path, const std::string &body) {
+    if (mode == Mode::Binary) {
+        W w;
+        w.u8(T_MGMT);
+        w.varint(reqId);
+        w.str(method);
+        w.str(path);
+        w.bytes(body);
+        return w.b;
+    }
+    J o = J::O();
+    o.set("type", J::S("mgmt"));
+    o.set("req_id", J::N((double)reqId));
+    o.set("method", J::S(method));
+    o.set("path", J::S(path));
+    o.set("body_b64", J::S(b64encode(body)));
+    return o.dump();
+}
+
 // ==================== 解码（服务端 -> 客户端）====================
 
 inline InMsg decServer(Mode mode, const std::string &raw) {
@@ -305,6 +331,12 @@ inline InMsg decServer(Mode mode, const std::string &raw) {
             m.streamId = r.varint();
             m.data = r.bytes();
             break;
+        case T_MGMT_RESP:
+            m.type = "mgmt_resp";
+            m.reqId = r.varint();
+            m.status = (int)r.u16();
+            m.respBody = r.bytes();
+            break;
         default:
             m.type = "unknown";
         }
@@ -342,6 +374,10 @@ inline InMsg decServer(Mode mode, const std::string &raw) {
     } else if (m.type == "chunk") {
         m.streamId = (uint64_t)j.numv("stream_id");
         m.data = b64decodeStr(j.str("data_b64"));
+    } else if (m.type == "mgmt_resp") {
+        m.reqId = (uint64_t)j.numv("req_id");
+        m.status = (int)j.numv("status");
+        m.respBody = b64decodeStr(j.str("body_b64"));
     }
     return m;
 }

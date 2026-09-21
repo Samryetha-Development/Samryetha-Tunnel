@@ -58,6 +58,14 @@ pub enum ClientMsg {
         stream_id: u64,
         reason: String,
     },
+    /// 管理请求（走同一条控制通道，无需公网管理 API）
+    Mgmt {
+        req_id: u64,
+        method: String,
+        path: String,
+        #[serde(rename = "body_b64", with = "b64serde", default)]
+        body: Vec<u8>,
+    },
 }
 
 /// S -> C
@@ -91,6 +99,13 @@ pub enum ServerMsg {
         stream_id: u64,
         #[serde(rename = "data_b64", with = "b64serde", default)]
         data: Vec<u8>,
+    },
+    /// 管理响应
+    MgmtResp {
+        req_id: u64,
+        status: u16,
+        #[serde(rename = "body_b64", with = "b64serde", default)]
+        body: Vec<u8>,
     },
 }
 

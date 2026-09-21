@@ -1,9 +1,10 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use futures::{SinkExt, StreamExt};
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -17,20 +18,23 @@ use crate::util;
 pub async fn tunnel_handler(
     State(state): State<AppState>,
     Query(q): Query<HashMap<String, String>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
-    let Some(raw) = util::parse_bearer(&headers) else {
-        return (StatusCode::UNAUTHORIZED, "缺少 Bearer Token").into_response();
-    };
-    let Some(user) = auth::api_token_user(&state.db, &raw).await else {
-        return (StatusCode::UNAUTHORIZED, "API Token 无效").into_response();
-    };
     // v=3 走私有二进制协议；缺省为 JSON 兼容模式
     let binary = q.get("v").map(|v| v == "3").unwrap_or(false);
-    // 每条 WebSocket 连接一个 conn_id：一个客户端可开多条连接（每隧道独立，避免队头阻塞）
     let conn_id = state.registry.new_conn_id().await;
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user, binary, conn_id))
+
+    // 带有效 Token -> 正常连接；否则 -> 匿名连接（仅允许设备码登录引导）
+    if let Some(raw) = util::parse_bearer(&headers) {
+        if let Some(user) = auth::api_token_user(&state.db, &raw).await {
+            return ws
+                .on_upgrade(move |socket| handle_socket(socket, state, user, binary, conn_id))
+                .into_response();
+        }
+    }
+    ws.on_upgrade(move |socket| handle_anon(socket, state, binary, conn_id, peer))
         .into_response()
 }
 
@@ -347,6 +351,12 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binar
                 state.registry.take_pending(stream_id).await;
                 state.stream_release(user_id).await;
             }
+            ClientMsg::Mgmt { req_id, method, path, body } => {
+                let (status, v) =
+                    crate::mgmt::handle(&state, Some(&user), &method, &path, &body).await;
+                let bytes = serde_json::to_vec(&v).unwrap_or_default();
+                let _ = tx.send(ServerMsg::MgmtResp { req_id, status, body: bytes });
+            }
         }
     }
 
@@ -365,4 +375,64 @@ pub fn filter_headers(
         .filter(|(k, _)| !skip.contains(&k.to_lowercase().as_str()))
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
+}
+
+/// 匿名连接：未携带有效 Token，仅允许设备码登录/配置查询（用于首次登录引导）
+pub async fn handle_anon(
+    socket: WebSocket,
+    state: AppState,
+    binary: bool,
+    conn_id: u64,
+    peer: SocketAddr,
+) {
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
+
+    let write_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(20));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    if ws_tx.send(encode_out(&ServerMsg::Ping, binary)).await.is_err() { break; }
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Some(m) => { if ws_tx.send(encode_out(&m, binary)).await.is_err() { break; } }
+                        None => break,
+                    }
+                }
+            }
+        }
+    });
+
+    info!("anonymous control channel opened: peer={peer} conn={conn_id} (login only)");
+
+    while let Some(msg) = ws_rx.next().await {
+        let Ok(msg) = msg else { break };
+        let parsed: Result<ClientMsg, String> = match msg {
+            Message::Binary(b) if binary => crate::binproto::decode_client(&b),
+            Message::Text(t) if !binary => serde_json::from_str(&t).map_err(|e| e.to_string()),
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(parsed) = parsed else { continue };
+        match parsed {
+            ClientMsg::Pong => {}
+            ClientMsg::Mgmt { req_id, method, path, body } => {
+                if !crate::mgmt::anon_allowed(&path) {
+                    let v = serde_json::json!({"error": "未登录；匿名连接仅允许设备码登录"});
+                    let bytes = serde_json::to_vec(&v).unwrap_or_default();
+                    let _ = tx.send(ServerMsg::MgmtResp { req_id, status: 401, body: bytes });
+                    continue;
+                }
+                let (status, v) = crate::mgmt::handle(&state, None, &method, &path, &body).await;
+                let bytes = serde_json::to_vec(&v).unwrap_or_default();
+                let _ = tx.send(ServerMsg::MgmtResp { req_id, status, body: bytes });
+            }
+            _ => {}
+        }
+    }
+    info!("anonymous control channel closed: conn={conn_id}");
+    write_task.abort();
+    let _ = write_task.await;
 }

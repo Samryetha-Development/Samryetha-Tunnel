@@ -659,6 +659,47 @@ static bool httpJson(const std::string &base, const std::string &token, const st
     return httpRequest(base + path, method, hs, body, out, err);
 }
 
+/// 通过隧道控制通道执行管理请求（无需公网管理 API）
+static int wsMgmt(const std::string &server, const std::string &token, const std::string &method,
+                  const std::string &path, const std::string &body, std::string *out) {
+    WebSocket ws;
+    std::string err;
+    if (!ws.connect(server, token, &err)) {
+        std::cerr << "连接失败: " << err << "\n";
+        return 1;
+    }
+    std::atomic<bool> stop{false};
+    ws.setReadTimeout(1000);
+    ws.setStopFlag(&stop);
+    if (!ws.sendText(encMgmt(Mode::Json, 1, method, path, body), &err)) {
+        std::cerr << "发送失败: " << err << "\n";
+        return 1;
+    }
+    for (;;) {
+        std::string raw;
+        bool bin = false;
+        if (!ws.recvMessage(raw, bin, &err)) {
+            std::cerr << "读取失败: " << err << "\n";
+            return 1;
+        }
+        InMsg m;
+        try {
+            m = decServer(Mode::Json, raw);
+        } catch (...) {
+            continue;
+        }
+        if (m.type == "ping") {
+            ws.sendText(encPong(Mode::Json));
+            continue;
+        }
+        if (m.type == "mgmt_resp" && m.reqId == 1) {
+            if (out)
+                *out = m.respBody;
+            return m.status >= 400 ? 2 : 0;
+        }
+    }
+}
+
 static void printJson(const std::string &body) {
     J j = J::parse(body);
     std::cout << j.dump() << "\n";
@@ -672,7 +713,10 @@ static int apiFail(const HttpResponse &r) {
 static void apiUsage() {
     std::cout <<
         "tunnel-lite api - 管理命令（全部操作无需网页控制台）\n\n"
-        "通用: --base <http(s)://host[:port]>  --token <API Token>\n\n"
+        "通用:\n"
+        "  --server <ws(s)://host/tunnel>   走隧道通道（推荐，无需公网管理 API）\n"
+        "  --base   <http(s)://host[:port]> 走 HTTP 管理 API（如本机/SSH 转发）\n"
+        "  --token  <API Token>\n\n"
         "  me                                  当前用户\n"
         "  token-list                          列出 API Token\n"
         "  token-create <名称>                 新建（明文只显示一次）\n"
@@ -689,22 +733,23 @@ static void apiUsage() {
         "  admin-tunnels / admin-tunnel-disable <id> / admin-tunnel-enable <id>\n"
         "  admin-audit [--limit N]\n\n"
         "登录（获取 Token）:\n"
-        "  tunnel-lite login --base URL --dev <邮箱>       # dev 模式\n"
-        "  tunnel-lite login --base URL --device           # SSO 设备码\n";
+        "  tunnel-lite login --server wss://HOST/tunnel --device   # SSO 设备码（走隧道）\n"
+        "  tunnel-lite login --base http://127.0.0.1:18080 --dev <邮箱>  # dev 模式（仅本机）\n";
 }
 
 static int loginMain(int argc, char **argv) {
-    std::string base, dev, token;
+    std::string base, dev, server, token;
     bool device = false;
     for (int i = 2; i < argc; ++i) {
         std::string a = argv[i];
         auto next = [&](std::string &out) { if (i + 1 < argc) out = argv[++i]; };
         if (a == "--base") next(base);
+        else if (a == "--server") next(server);
         else if (a == "--dev") next(dev);
         else if (a == "--device") device = true;
         else if (a == "-h" || a == "--help") { apiUsage(); return 0; }
     }
-    if (base.empty()) { std::cerr << "缺少 --base\n"; return 2; }
+    if (base.empty() && server.empty()) { std::cerr << "缺少 --server 或 --base\n"; return 2; }
 
     if (!dev.empty()) {
         HttpResponse r; std::string err;
@@ -717,6 +762,31 @@ static int loginMain(int argc, char **argv) {
         std::cout << token << "\n";
         std::cerr << "已登录: " << j.at("user").str("email") << "（把上面这行保存为 API Token）\n";
         return 0;
+    }
+    if (device && !server.empty()) {
+        std::string out;
+        if (wsMgmt(server, "", "POST", "/auth/device/start", "{}", &out) != 0) {
+            std::cerr << "设备码请求失败: " << out << "\n";
+            return 1;
+        }
+        J s = J::parse(out);
+        const std::string code = s.str("device_code");
+        const int interval = (int)s.numv("interval", 5);
+        std::cerr << "请打开 " << s.str("verification_uri") << " 输入代码 " << s.str("user_code") << "\n";
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(interval > 0 ? interval : 5));
+            std::string p;
+            wsMgmt(server, "", "POST", "/auth/device/poll", "{\"device_code\":\"" + code + "\"}", &p);
+            J j = J::parse(p);
+            const std::string st = j.str("status");
+            if (st == "ok") {
+                std::cout << j.str("token") << "\n";
+                std::cerr << "已登录: " << j.at("user").str("email") << "\n";
+                return 0;
+            }
+            if (st == "error") { std::cerr << "登录失败: " << j.str("error") << "\n"; return 1; }
+            std::cerr << "等待授权…\n";
+        }
     }
     if (device) {
         HttpResponse r; std::string err;
@@ -749,7 +819,7 @@ static int loginMain(int argc, char **argv) {
 }
 
 static int apiMain(int argc, char **argv) {
-    std::string base, token, cmd, arg, basic, ips;
+    std::string base, server, token, cmd, arg, basic, ips;
     long long limit = 100, maxTunnels = -1, dailyBytes = -1;
     std::string role; int disableState = -1;
     std::vector<std::string> pos;
@@ -758,6 +828,7 @@ static int apiMain(int argc, char **argv) {
         std::string a = argv[i];
         auto next = [&](std::string &out) { if (i + 1 < argc) out = argv[++i]; };
         if (a == "--base") next(base);
+        else if (a == "--server") next(server);
         else if (a == "--token") next(token);
         else if (a == "--limit") { std::string v; next(v); limit = std::atoll(v.c_str()); }
         else if (a == "--basic") next(basic);
@@ -773,9 +844,22 @@ static int apiMain(int argc, char **argv) {
     if (pos.empty()) { apiUsage(); return 2; }
     cmd = pos[0];
     if (pos.size() > 1) arg = pos[1];
-    if (base.empty()) { std::cerr << "缺少 --base（如 http://127.0.0.1:18080 或 https://frp.samryetha.com/tunnel-admin）\n"; return 2; }
+    if (base.empty() && server.empty()) {
+        std::cerr << "缺少 --server（隧道通道）或 --base（HTTP API）\n";
+        return 2;
+    }
+    const bool viaWs = !server.empty();
 
     auto call = [&](const std::string &method, const std::string &path, const std::string &body) -> int {
+        if (viaWs) {
+            std::string out;
+            const int rc = wsMgmt(server, token, method, path, body, &out);
+            if (rc == 1) return 1;
+            if (rc == 2) { std::cerr << out << "\n"; return 1; }
+            if (!out.empty()) printJson(out);
+            else std::cout << "ok\n";
+            return 0;
+        }
         HttpResponse r; std::string err;
         if (!httpJson(base, token, method, path, body, r, &err)) { std::cerr << "请求失败: " << err << "\n"; return 1; }
         if (r.status >= 400) return apiFail(r);
@@ -854,7 +938,7 @@ static void usage() {
     std::cout << "tunnel-lite " << kVersion << " - 轻量跨平台客户端（无 Qt）\n\n"
         "子命令:\n"
         "  (默认)      建立隧道（见下）\n"
-        "  login       获取 API Token（--dev 邮箱 / --device 设备码）\n"
+        "  login       获取 API Token（--server ... --device / --base ... --dev 邮箱）\n"
         "  api         管理命令：Token/隧道/访客鉴权/用量/管理员（无网页控制台）\n"
         "  api --help  查看全部管理命令\n\n"
         "建立隧道:\n"

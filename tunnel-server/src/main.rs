@@ -2,6 +2,7 @@ mod auth;
 mod binproto;
 mod config;
 mod db;
+mod mgmt;
 mod models;
 mod protocol;
 mod quota;
