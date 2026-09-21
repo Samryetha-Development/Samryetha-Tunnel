@@ -2,7 +2,6 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
@@ -173,7 +172,7 @@ pub async fn visitor_handler(
         method: method.clone(),
         path: forward_full,
         headers: filter_headers(&headers),
-        body_b64: base64::engine::general_purpose::STANDARD.encode(&body_bytes),
+        body: body_bytes.to_vec(),
     };
     if !state.registry.send_to_user(target.user_id, open).await {
         state.registry.take_pending(stream_id).await;

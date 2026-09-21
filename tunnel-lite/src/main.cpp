@@ -1,10 +1,12 @@
 // tunnel-lite：不依赖 Qt 的极简跨平台客户端（macOS/Linux/Windows）
-// 目标：单文件小体积、低内存占用，适合服务器/长期常驻。
+// 支持两种应用层协议：
+//   json    —— 兼容模式（WebSocket 文本 + JSON/base64）
+//   binary  —— 私有二进制帧 v3（更少字节、更低 CPU/延迟）
 // 用法：
 //   tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token you@example.com \
-//               --tunnel id=web,path=/web,local=127.0.0.1:8080
-//   tunnel-lite --server wss://frp.example.com/tunnel --token tun_xxx --tunnel ...
+//               --tunnel id=web,path=/web,local=127.0.0.1:8080 [--proto binary]
 
+#include "codec.hpp"
 #include "json.hpp"
 #include "net.hpp"
 #include "util.hpp"
@@ -12,12 +14,15 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <deque>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -40,8 +45,10 @@
 using namespace lite;
 
 static std::atomic<bool> g_stop{false};
+static Mode g_mode = Mode::Json;
+static const char *kVersion = "0.4.0";
 
-// ---------------- 工具 ----------------
+// ---------------- 日志 ----------------
 
 static bool colorEnabled() {
     static int c = -1;
@@ -92,15 +99,9 @@ static std::string fmtBytes(long long b) {
     return buf;
 }
 
-struct TunnelDef {
-    std::string id;
-    std::string proto = "http";
-    std::string subdomain;
-    std::string pathPrefix;
-    std::string localAddr;
-};
+// ---------------- 参数 ----------------
 
-static bool parseTunnelSpec(const std::string &spec, TunnelDef &d) {
+static bool parseTunnelSpec(const std::string &spec, TunnelCfg &d) {
     std::stringstream ss(spec);
     std::string part;
     while (std::getline(ss, part, ',')) {
@@ -112,11 +113,11 @@ static bool parseTunnelSpec(const std::string &spec, TunnelDef &d) {
         std::transform(k.begin(), k.end(), k.begin(), ::tolower);
         if (k == "id" || k == "tunnel_id") d.id = v;
         else if (k == "proto") d.proto = v;
-        else if (k == "sub" || k == "subdomain") d.subdomain = v;
-        else if (k == "path" || k == "prefix" || k == "path_prefix") d.pathPrefix = v;
-        else if (k == "local" || k == "local_addr") d.localAddr = v;
+        else if (k == "sub" || k == "subdomain") d.sub = v;
+        else if (k == "path" || k == "prefix" || k == "path_prefix") d.path = v;
+        else if (k == "local" || k == "local_addr") d.local = v;
     }
-    return !d.id.empty() && !d.localAddr.empty();
+    return !d.id.empty() && !d.local.empty();
 }
 
 static std::string httpBaseFromWs(const std::string &ws) {
@@ -155,7 +156,7 @@ struct Session {
         std::lock_guard<std::mutex> l(sendMtx);
         if (!alive || !ws)
             return false;
-        return ws->sendText(s);
+        return g_mode == Mode::Binary ? ws->sendBinary(s) : ws->sendText(s);
     }
 };
 
@@ -165,35 +166,64 @@ struct Stream {
     std::string tunnelId;
     std::string localAddr;
     Socket sock;
-    std::mutex mtx;              // 保护 sock 写与 pending
+    std::mutex mtx;
     std::atomic<bool> connected{false};
     std::atomic<bool> closed{false};
-    std::string pending;         // TCP：本地连接建立前的早到数据
+    std::string pending;
 };
 
 static std::mutex g_streamsMtx;
 static std::map<uint64_t, std::shared_ptr<Stream>> g_streams;
 
-static std::string buildRegister(const std::string &clientId, const std::vector<TunnelDef> &ts) {
-    J root = J::O();
-    root.set("type", J::S("register"));
-    root.set("client_id", J::S(clientId));
-    J arr = J::A();
-    for (const auto &t : ts) {
-        J o = J::O();
-        o.set("tunnel_id", J::S(t.id));
-        o.set("proto", J::S(t.proto.empty() ? "http" : t.proto));
-        if (!t.subdomain.empty())
-            o.set("subdomain", J::S(t.subdomain));
-        if (!t.pathPrefix.empty())
-            o.set("path_prefix", J::S(t.pathPrefix));
-        if (!t.localAddr.empty())
-            o.set("local_addr", J::S(t.localAddr));
-        arr.push(J(std::move(o)));
+// ---------------- 工作线程池（避免每个请求创建线程）----------------
+
+class Pool {
+public:
+    void start(int n) {
+        for (int i = 0; i < n; ++i)
+            workers_.emplace_back([this]() {
+                for (;;) {
+                    std::function<void()> job;
+                    {
+                        std::unique_lock<std::mutex> l(m_);
+                        cv_.wait(l, [this]() { return stop_ || !q_.empty(); });
+                        if (stop_ && q_.empty())
+                            return;
+                        job = std::move(q_.front());
+                        q_.pop_front();
+                    }
+                    job();
+                }
+            });
     }
-    root.set("tunnels", arr);
-    return root.dump();
-}
+    void submit(std::function<void()> fn) {
+        {
+            std::lock_guard<std::mutex> l(m_);
+            q_.push_back(std::move(fn));
+        }
+        cv_.notify_one();
+    }
+    void stop() {
+        {
+            std::lock_guard<std::mutex> l(m_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        for (auto &t : workers_)
+            if (t.joinable())
+                t.join();
+        workers_.clear();
+    }
+
+private:
+    std::deque<std::function<void()>> q_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::vector<std::thread> workers_;
+    bool stop_ = false;
+};
+
+static Pool g_pool;
 
 // ---------------- 本地转发 ----------------
 
@@ -212,12 +242,9 @@ static bool readHttpHead(Socket &s, std::string &head) {
 }
 
 static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st,
-                             const J &open) {
+                             const OpenStream &req) {
     const auto t0 = std::chrono::steady_clock::now();
     long long sent = 0;
-    const std::string method = open.str("method", "GET");
-    const std::string path = open.str("path", "/");
-    const std::string body = b64decodeStr(open.str("body_b64"));
 
     std::string host;
     int port;
@@ -225,50 +252,36 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
     std::string err;
     if (!st->sock.connectTo(host, port, &err)) {
         log("err", st->tunnelId, "本地连接失败: " + err);
-        J ab = J::O();
-        ab.set("type", J::S("abort"));
-        ab.set("stream_id", J::N((double)st->id));
-        ab.set("reason", J::S(err));
-        sess->send(ab.dump());
+        sess->send(encAbort(g_mode, st->id, err));
         return;
     }
 
-    // 组装请求
-    std::string req = method + " " + path + " HTTP/1.1\r\n";
-    req += "Host: " + st->localAddr + "\r\n";
-    req += "Connection: close\r\n";
-    if (open.has("headers")) {
-        const J &hs = open.at("headers");
-        for (const auto &kv : hs.o) {
-            std::string k = kv.first;
-            std::string lk = k;
-            std::transform(lk.begin(), lk.end(), lk.begin(), ::tolower);
-            if (lk == "host" || lk == "content-length" || lk == "connection" ||
-                lk == "transfer-encoding" || lk == "accept-encoding")
-                continue;
-            req += k + ": " + kv.second.s + "\r\n";
-        }
+    std::string r = req.method + " " + req.path + " HTTP/1.1\r\n";
+    r += "Host: " + st->localAddr + "\r\n";
+    r += "Connection: close\r\n";
+    for (const auto &kv : req.headers) {
+        std::string lk = kv.first;
+        std::transform(lk.begin(), lk.end(), lk.begin(), ::tolower);
+        if (lk == "host" || lk == "content-length" || lk == "connection" ||
+            lk == "transfer-encoding" || lk == "accept-encoding")
+            continue;
+        r += kv.first + ": " + kv.second + "\r\n";
     }
-    if (!body.empty())
-        req += "Content-Length: " + std::to_string(body.size()) + "\r\n";
-    req += "\r\n";
-    req += body;
-    if (!st->sock.writeAll(req.data(), req.size())) {
+    if (!req.body.empty())
+        r += "Content-Length: " + std::to_string(req.body.size()) + "\r\n";
+    r += "\r\n";
+    r += req.body;
+    if (!st->sock.writeAll(r.data(), r.size())) {
         log("err", st->tunnelId, "写本地请求失败");
         return;
     }
 
     std::string head;
     if (!readHttpHead(st->sock, head)) {
-        J ab = J::O();
-        ab.set("type", J::S("abort"));
-        ab.set("stream_id", J::N((double)st->id));
-        ab.set("reason", J::S("本地无响应"));
-        sess->send(ab.dump());
+        sess->send(encAbort(g_mode, st->id, "本地无响应"));
         return;
     }
 
-    // 解析状态行与头
     auto lineEnd = head.find("\r\n");
     std::string statusLine = head.substr(0, lineEnd);
     std::istringstream ls(statusLine);
@@ -277,7 +290,7 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
     ls >> http >> status;
     std::getline(ls, reason);
 
-    J headers = J::O();
+    std::map<std::string, std::string> headers;
     bool chunked = false;
     long long contentLength = -1;
     size_t pos = lineEnd + 2;
@@ -299,39 +312,29 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
             if (lk == "content-length")
                 contentLength = std::atoll(v.c_str());
             if (lk != "content-length" && lk != "connection" && lk != "transfer-encoding")
-                headers.set(k, J::S(v));
+                headers[k] = v;
         }
         pos = e + 2;
     }
 
-    J headMsg = J::O();
-    headMsg.set("type", J::S("response_head"));
-    headMsg.set("stream_id", J::N((double)st->id));
-    headMsg.set("status", J::N(status));
-    headMsg.set("headers", headers);
-    sess->send(headMsg.dump());
+    sess->send(encHead(g_mode, st->id, status, headers));
 
     auto sendChunk = [&](const std::string &data) {
         if (data.empty())
             return;
         sent += (long long)data.size();
-        J c = J::O();
-        c.set("type", J::S("chunk"));
-        c.set("stream_id", J::N((double)st->id));
-        c.set("data_b64", J::S(b64encode(data)));
-        sess->send(c.dump());
+        sess->send(encChunk(g_mode, st->id, data));
     };
 
     char buf[16384];
-    long total = 0;
+    long long total = 0;
     if (chunked) {
-        // 解析 chunked
         for (;;) {
             std::string sizeLine;
             char c;
             while (true) {
-                long r = st->sock.readSome(&c, 1);
-                if (r <= 0)
+                long rr = st->sock.readSome(&c, 1);
+                if (rr <= 0)
                     break;
                 if (c == '\n')
                     break;
@@ -345,11 +348,11 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
                 break;
             long got = 0;
             while (got < sz) {
-                long r = st->sock.readSome(buf, std::min<long>(sizeof(buf), sz - got));
-                if (r <= 0)
+                long rr = st->sock.readSome(buf, std::min<long>(sizeof(buf), sz - got));
+                if (rr <= 0)
                     break;
-                sendChunk(std::string(buf, (size_t)r));
-                got += r;
+                sendChunk(std::string(buf, (size_t)rr));
+                got += rr;
             }
             char crlf[2];
             st->sock.readSome(crlf, 2);
@@ -361,18 +364,15 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
             size_t want = sizeof(buf);
             if (contentLength >= 0)
                 want = std::min<size_t>(sizeof(buf), (size_t)(contentLength - total));
-            long r = st->sock.readSome(buf, want);
-            if (r <= 0)
+            long rr = st->sock.readSome(buf, want);
+            if (rr <= 0)
                 break;
-            sendChunk(std::string(buf, (size_t)r));
-            total += r;
+            sendChunk(std::string(buf, (size_t)rr));
+            total += rr;
         }
     }
 
-    J end = J::O();
-    end.set("type", J::S("end"));
-    end.set("stream_id", J::N((double)st->id));
-    sess->send(end.dump());
+    sess->send(encEnd(g_mode, st->id));
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
@@ -389,11 +389,7 @@ static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::sha
     splitAddr(st->localAddr, host, port);
     std::string err;
     if (!st->sock.connectTo(host, port, &err)) {
-        J ab = J::O();
-        ab.set("type", J::S("abort"));
-        ab.set("stream_id", J::N((double)st->id));
-        ab.set("reason", J::S(err));
-        sess->send(ab.dump());
+        sess->send(encAbort(g_mode, st->id, err));
         return;
     }
     {
@@ -404,24 +400,15 @@ static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::sha
             st->pending.clear();
         }
     }
-    // 本地 -> 服务端
     char buf[16384];
     long r;
     while (!st->closed && (r = st->sock.readSome(buf, sizeof(buf))) > 0) {
         total += r;
-        J c = J::O();
-        c.set("type", J::S("chunk"));
-        c.set("stream_id", J::N((double)st->id));
-        c.set("data_b64", J::S(b64encode(std::string(buf, (size_t)r))));
-        if (!sess->send(c.dump()))
+        if (!sess->send(encChunk(g_mode, st->id, std::string(buf, (size_t)r))))
             break;
     }
-    if (!st->closed) {
-        J e = J::O();
-        e.set("type", J::S("end"));
-        e.set("stream_id", J::N((double)st->id));
-        sess->send(e.dump());
-    }
+    if (!st->closed)
+        sess->send(encEnd(g_mode, st->id));
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
@@ -437,8 +424,12 @@ static void eraseStream(uint64_t id) {
 
 // ---------------- 控制循环 ----------------
 
-static bool runOnce(const std::string &server, const std::string &token, const std::string &clientId,
-                    const std::vector<TunnelDef> &tunnels) {
+static bool runOnce(const std::string &serverIn, const std::string &token, const std::string &clientId,
+                    const std::vector<TunnelCfg> &tunnels, uint64_t &txOut, uint64_t &rxOut) {
+    std::string server = serverIn;
+    if (g_mode == Mode::Binary)
+        server += (server.find('?') == std::string::npos ? "?v=3" : "&v=3");
+
     auto sess = std::make_shared<Session>();
     sess->ws = std::make_shared<WebSocket>();
     std::string err;
@@ -446,91 +437,85 @@ static bool runOnce(const std::string &server, const std::string &token, const s
         log("warn", "net", "连接失败: " + err);
         return false;
     }
-    log("ok", "net", "控制通道已建立，注册 " + std::to_string(tunnels.size()) + " 条隧道");
+    const char *pname = g_mode == Mode::Binary ? "binary-v3" : "json";
+    log("ok", "net", std::string("控制通道已建立（") + pname + "），注册 " +
+                        std::to_string(tunnels.size()) + " 条隧道");
     sess->ws->setReadTimeout(1000);
     sess->ws->setStopFlag(&g_stop);
-    sess->send(buildRegister(clientId, tunnels));
+    sess->send(encRegister(g_mode, clientId, tunnels));
 
     while (!g_stop) {
-        std::string text;
-        if (!sess->ws->recvText(text, &err)) {
+        std::string raw;
+        bool isBin = false;
+        if (!sess->ws->recvMessage(raw, isBin, &err)) {
             log("info", "net", "连接结束: " + err);
             break;
         }
-        std::string perr;
-        J m = J::parse(text, &perr);
-        const std::string type = m.str("type");
+        InMsg m;
+        try {
+            m = decServer(g_mode, raw);
+        } catch (const std::exception &e) {
+            log("warn", "net", std::string("非法帧: ") + e.what());
+            continue;
+        }
 
-        if (type == "ping") {
-            J p = J::O();
-            p.set("type", J::S("pong"));
-            sess->send(p.dump());
-        } else if (type == "register_ack") {
-            const std::string aerr = m.str("error");
-            if (!aerr.empty())
-                log("warn", "net", "服务端提示: " + aerr);
-            if (m.boolean("ok")) {
-                for (const auto &t : m.at("tunnels").a)
-                    log("ok", t.str("tunnel_id"), "公网地址 " + t.str("public_url"));
+        if (m.type == "ping") {
+            sess->send(encPong(g_mode));
+        } else if (m.type == "register_ack") {
+            if (!m.ackError.empty())
+                log("warn", "net", "服务端提示: " + m.ackError);
+            if (m.ackOk) {
+                for (const auto &t : m.tunnels)
+                    log("ok", t.id, "公网地址 " + t.url);
             } else {
                 log("err", "net", "注册失败");
             }
-        } else if (type == "open_stream") {
+        } else if (m.type == "open_stream") {
             auto st = std::make_shared<Stream>();
-            st->id = (uint64_t)m.numv("stream_id");
-            st->proto = m.str("proto", "http");
-            st->tunnelId = m.str("tunnel_id");
-            st->localAddr = m.str("local_addr");
-            // local_addr 由客户端配置决定
+            st->id = m.os.streamId;
+            st->proto = m.os.proto;
+            st->tunnelId = m.os.tunnelId;
             for (const auto &t : tunnels)
                 if (t.id == st->tunnelId)
-                    st->localAddr = t.localAddr;
+                    st->localAddr = t.local;
             if (st->localAddr.empty()) {
-                J ab = J::O();
-                ab.set("type", J::S("abort"));
-                ab.set("stream_id", J::N((double)st->id));
-                ab.set("reason", J::S("unknown tunnel"));
-                sess->send(ab.dump());
+                sess->send(encAbort(g_mode, st->id, "unknown tunnel"));
                 continue;
             }
             {
                 std::lock_guard<std::mutex> g(g_streamsMtx);
                 g_streams[st->id] = st;
             }
-            if (st->proto == "tcp") {
+            if (st->proto == "tcp")
                 std::thread([sess, st]() { handleTcpStream(sess, st); }).detach();
-            } else {
-                std::thread([sess, st, m]() {
-                    handleHttpStream(sess, st, m);
+            else
+                g_pool.submit([sess, st, os = m.os]() {
+                    handleHttpStream(sess, st, os);
                     eraseStream(st->id);
-                }).detach();
-            }
-        } else if (type == "chunk") {
-            const uint64_t id = (uint64_t)m.numv("stream_id");
+                });
+        } else if (m.type == "chunk") {
             std::shared_ptr<Stream> st;
             {
                 std::lock_guard<std::mutex> g(g_streamsMtx);
-                auto it = g_streams.find(id);
+                auto it = g_streams.find(m.streamId);
                 if (it != g_streams.end())
                     st = it->second;
             }
             if (st) {
-                std::string data = b64decodeStr(m.str("data_b64"));
                 std::lock_guard<std::mutex> l(st->mtx);
                 if (st->connected)
-                    st->sock.writeAll(data.data(), data.size());
+                    st->sock.writeAll(m.data.data(), m.data.size());
                 else
-                    st->pending += data;
+                    st->pending += m.data;
             }
-        } else if (type == "close_stream") {
-            const uint64_t id = (uint64_t)m.numv("stream_id");
+        } else if (m.type == "close_stream") {
             std::shared_ptr<Stream> st;
             {
                 std::lock_guard<std::mutex> g(g_streamsMtx);
-                auto it = g_streams.find(id);
+                auto it = g_streams.find(m.streamId);
                 if (it != g_streams.end())
                     st = it->second;
-                g_streams.erase(id);
+                g_streams.erase(m.streamId);
             }
             if (st) {
                 st->closed = true;
@@ -538,39 +523,41 @@ static bool runOnce(const std::string &server, const std::string &token, const s
             }
         }
     }
+    txOut = sess->ws->txBytes();
+    rxOut = sess->ws->rxBytes();
     sess->alive = false;
     sess->ws->close();
-    // 清理未完成流
-    std::lock_guard<std::mutex> g(g_streamsMtx);
-    for (auto &kv : g_streams) {
-        kv.second->closed = true;
-        kv.second->sock.shutdownAll();
+    {
+        std::lock_guard<std::mutex> g(g_streamsMtx);
+        for (auto &kv : g_streams) {
+            kv.second->closed = true;
+            kv.second->sock.shutdownAll();
+        }
+        g_streams.clear();
     }
-    g_streams.clear();
     return true;
 }
 
 // ---------------- main ----------------
 
-static const char *kVersion = "0.3.0";
-
 static void usage() {
-    std::cout <<
-        "tunnel-lite " << kVersion << " - 轻量跨平台客户端（无 Qt）\n\n"
+    std::cout << "tunnel-lite " << kVersion << " - 轻量跨平台客户端（无 Qt）\n\n"
         "用法:\n"
         "  tunnel-lite --server <ws://|wss://.../tunnel> [--token T | --dev-token EMAIL]\n"
         "              [--client-id ID] [--config file.json] [--no-reconnect]\n"
+        "              [--proto json|binary]\n"
         "              --tunnel id=ID,proto=http|tcp,sub=..,path=..,local=host:port（可重复）\n\n"
+        "协议:\n"
+        "  json    JSON + base64（兼容，默认）\n"
+        "  binary  私有二进制帧 v3（更少字节、更低延迟）\n\n"
         "示例:\n"
         "  tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token a@b.com \\\n"
-        "              --tunnel id=web,path=/web,local=127.0.0.1:8080\n"
-        "  tunnel-lite --server ws://47.103.21.5:18091/tunnel --token tun_xxx \\\n"
-        "              --tunnel id=ssh,proto=tcp,local=127.0.0.1:22\n";
+        "              --tunnel id=web,path=/web,local=127.0.0.1:8080 --proto binary\n";
 }
 
 int main(int argc, char **argv) {
     std::string server, token, devToken, clientId = "lite", configPath;
-    std::vector<TunnelDef> tunnels;
+    std::vector<TunnelCfg> tunnels;
     bool noReconnect = false;
 
     for (int i = 1; i < argc; ++i) {
@@ -591,10 +578,20 @@ int main(int argc, char **argv) {
         else if (a == "--client-id") next(clientId);
         else if (a == "-c" || a == "--config") next(configPath);
         else if (a == "--no-reconnect") noReconnect = true;
-        else if (a == "--tunnel") {
+        else if (a == "--proto") {
+            std::string p;
+            next(p);
+            std::transform(p.begin(), p.end(), p.begin(), ::tolower);
+            if (p == "binary" || p == "bin" || p == "v3") g_mode = Mode::Binary;
+            else if (p == "json") g_mode = Mode::Json;
+            else {
+                std::cerr << "未知协议: " << p << "（json|binary）\n";
+                return 2;
+            }
+        } else if (a == "--tunnel") {
             std::string spec;
             next(spec);
-            TunnelDef d;
+            TunnelCfg d;
             if (parseTunnelSpec(spec, d))
                 tunnels.push_back(d);
             else {
@@ -604,7 +601,6 @@ int main(int argc, char **argv) {
         }
     }
 
-    // 配置文件（可选）
     if (!configPath.empty()) {
         std::ifstream f(configPath);
         if (f) {
@@ -616,12 +612,12 @@ int main(int argc, char **argv) {
             if (clientId == "lite") clientId = cfg.str("client_id", clientId);
             if (tunnels.empty()) {
                 for (const auto &t : cfg.at("tunnels").a) {
-                    TunnelDef d;
+                    TunnelCfg d;
                     d.id = t.str("tunnel_id");
                     d.proto = t.str("proto", "http");
-                    d.subdomain = t.str("subdomain");
-                    d.pathPrefix = t.str("path_prefix");
-                    d.localAddr = t.str("local_addr");
+                    d.sub = t.str("subdomain");
+                    d.path = t.str("path_prefix");
+                    d.local = t.str("local_addr");
                     if (!d.id.empty())
                         tunnels.push_back(d);
                 }
@@ -637,7 +633,6 @@ int main(int argc, char **argv) {
     if (tunnels.empty())
         std::cerr << "警告：没有配置任何隧道\n";
 
-    // dev-token 换取
     if (token.empty() && !devToken.empty()) {
         const std::string base = httpBaseFromWs(server);
         std::vector<std::pair<std::string, std::string>> hs = {{"Content-Type", "application/json"}};
@@ -665,9 +660,15 @@ int main(int argc, char **argv) {
     std::signal(SIGINT, [](int) { g_stop = true; });
     std::signal(SIGTERM, [](int) { g_stop = true; });
 
+    int poolSize = 16;
+    if (const char *p = std::getenv("TUNNEL_POOL"))
+        poolSize = std::max(1, std::atoi(p));
+    g_pool.start(poolSize);
+
+    uint64_t tx = 0, rx = 0;
     int backoff = 1;
     while (!g_stop) {
-        if (runOnce(server, token, clientId, tunnels))
+        if (runOnce(server, token, clientId, tunnels, tx, rx))
             backoff = 1;
         if (g_stop || noReconnect)
             break;
@@ -676,6 +677,9 @@ int main(int argc, char **argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         backoff = std::min(backoff * 2, 30);
     }
-    log("info", "cli", "已退出");
+    log("info", "cli",
+        std::string("已退出（协议 ") + (g_mode == Mode::Binary ? "binary-v3" : "json") +
+            "，累计发送 " + fmtBytes((long long)tx) + " / 接收 " + fmtBytes((long long)rx) + "）");
+    g_pool.stop();
     return 0;
 }

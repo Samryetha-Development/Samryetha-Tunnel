@@ -35,10 +35,14 @@ cmake --build build -j
 ## 用法
 
 ```bash
-# dev 模式联调
+# dev 模式联调（默认 JSON 兼容协议）
 tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token you@example.com \
             --tunnel id=web,path=/web,local=127.0.0.1:8080 \
             --tunnel id=sse,path=/sse,local=127.0.0.1:3000
+
+# 私有二进制协议 v3（字节数 −54%，尾延迟更低）
+tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token you@example.com \
+            --proto binary --tunnel id=web,path=/web,local=127.0.0.1:8080
 
 # 生产：直接用 API Token（服务端 Web 控制台「API Token」页生成）
 tunnel-lite --server wss://frp.example.com/tunnel --token tun_xxx \
@@ -50,6 +54,23 @@ tunnel-lite --server ws://47.103.21.5:18091/tunnel --token tun_xxx \
 ```
 
 隧道参数：`id=ID,proto=http|tcp,sub=子域名,path=/子路由,local=host:port`（`--tunnel` 可重复）。
+
+### 协议选择
+
+| `--proto` | 传输内容 | 说明 |
+| --- | --- | --- |
+| `json`（默认） | WebSocket 文本 + JSON/base64 | 向后兼容，可用 `wscat` 直接调 |
+| `binary` | WebSocket 二进制帧（私有 v3） | 字节数 −54%，高并发 p99 更低 |
+
+协议线格式与基准数据见 [`bench/README.md`](../bench/README.md)。
+
+### 性能相关
+
+- 工作线程池处理 HTTP 流（`TUNNEL_POOL` 调大小，默认 16），避免每请求建线程
+- 控制连接 1s 读超时：Ctrl+C 立即退出
+- 本地连接 5s 连接超时：本地服务卡死不会拖住线程
+- 断线指数退避重连（1s → 30s），`--no-reconnect` 可关闭
+- `wss://` 需 `-DTUNNEL_LITE_TLS=ON`；`ws://` 开箱即用
 
 ## 配置文件（可选）
 
@@ -88,4 +109,5 @@ WantedBy=multi-user.target
 
 - 断线指数退避重连（1s → 30s），`--no-reconnect` 可关闭
 - HTTP 流式回传（SSE 不被缓冲），TCP 双向转发，本地连接建立前的早到数据会缓存
+- 支持两种应用层协议：JSON（兼容）与私有二进制 v3
 - 目前 `wss://` 需 `-DTUNNEL_LITE_TLS=ON`；`ws://` 开箱即用

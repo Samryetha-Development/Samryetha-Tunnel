@@ -4,6 +4,23 @@ use std::collections::HashMap;
 /// 客户端上报的单条隧道（即 models::TunnelDef 的线上表示）
 pub use crate::models::TunnelDef;
 
+/// base64 编解码（仅 JSON 兼容模式使用；二进制模式走原始字节）
+pub mod b64serde {
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(v))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        base64::engine::general_purpose::STANDARD
+            .decode(s.as_bytes())
+            .map_err(serde::de::Error::custom)
+    }
+}
+
 /// 服务端下发的“生效隧道”（含命名空间后的公网地址）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EffectiveTunnel {
@@ -23,24 +40,20 @@ pub enum ClientMsg {
         tunnels: Vec<TunnelDef>,
     },
     Pong,
-    /// 响应头（流式第一步）
     ResponseHead {
         stream_id: u64,
         status: u16,
         #[serde(default)]
         headers: HashMap<String, String>,
     },
-    /// 响应体分块（可多次）
     Chunk {
         stream_id: u64,
-        #[serde(default)]
-        data_b64: String,
+        #[serde(rename = "data_b64", with = "b64serde", default)]
+        data: Vec<u8>,
     },
-    /// 响应结束
     End {
         stream_id: u64,
     },
-    /// 客户端主动报错结束
     Abort {
         stream_id: u64,
         reason: String,
@@ -68,18 +81,16 @@ pub enum ServerMsg {
         path: String,
         #[serde(default)]
         headers: HashMap<String, String>,
-        #[serde(default)]
-        body_b64: String,
+        #[serde(rename = "body_b64", with = "b64serde", default)]
+        body: Vec<u8>,
     },
-    /// 通知客户端取消（访客断开）
     CloseStream {
         stream_id: u64,
     },
-    /// 服务端 -> 客户端的上行数据（TCP 双向 / 后续流式上传）
     Chunk {
         stream_id: u64,
-        #[serde(default)]
-        data_b64: String,
+        #[serde(rename = "data_b64", with = "b64serde", default)]
+        data: Vec<u8>,
     },
 }
 

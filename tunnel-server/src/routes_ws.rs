@@ -1,9 +1,9 @@
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use base64::Engine;
 use futures::{SinkExt, StreamExt};
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -16,6 +16,7 @@ use crate::util;
 
 pub async fn tunnel_handler(
     State(state): State<AppState>,
+    Query(q): Query<HashMap<String, String>>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -25,7 +26,9 @@ pub async fn tunnel_handler(
     let Some(user) = auth::api_token_user(&state.db, &raw).await else {
         return (StatusCode::UNAUTHORIZED, "API Token 无效").into_response();
     };
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user))
+    // v=3 走私有二进制协议；缺省为 JSON 兼容模式
+    let binary = q.get("v").map(|v| v == "3").unwrap_or(false);
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user, binary))
         .into_response()
 }
 
@@ -199,7 +202,15 @@ async fn persist(state: &AppState, user: &User, prepared: &[Prepared]) {
     }
 }
 
-pub async fn handle_socket(socket: WebSocket, state: AppState, user: User) {
+fn encode_out(m: &ServerMsg, binary: bool) -> Message {
+    if binary {
+        Message::Binary(crate::binproto::encode_server(m))
+    } else {
+        Message::Text(serde_json::to_string(m).unwrap())
+    }
+}
+
+pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binary: bool) {
     let user_id = user.id;
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
@@ -209,16 +220,14 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User) {
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let ping = serde_json::to_string(&ServerMsg::Ping).unwrap();
-                    if ws_tx.send(Message::Text(ping)).await.is_err() {
+                    if ws_tx.send(encode_out(&ServerMsg::Ping, binary)).await.is_err() {
                         break;
                     }
                 }
                 msg = rx.recv() => {
                     match msg {
                         Some(m) => {
-                            let s = serde_json::to_string(&m).unwrap();
-                            if ws_tx.send(Message::Text(s)).await.is_err() {
+                            if ws_tx.send(encode_out(&m, binary)).await.is_err() {
                                 break;
                             }
                         }
@@ -229,16 +238,21 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User) {
         }
     });
 
-    info!("control channel opened: user={} ({})", user.email, user_id);
+    info!(
+        "control channel opened: user={} ({}) proto={}",
+        user.email,
+        user_id,
+        if binary { "binary-v3" } else { "json" }
+    );
 
     while let Some(msg) = ws_rx.next().await {
         let Ok(msg) = msg else { break };
-        let text = match msg {
-            Message::Text(t) => t,
+        let parsed: Result<ClientMsg, String> = match msg {
+            Message::Binary(b) if binary => crate::binproto::decode_client(&b),
+            Message::Text(t) if !binary => serde_json::from_str(&t).map_err(|e| e.to_string()),
             Message::Close(_) => break,
             _ => continue,
         };
-        let parsed: Result<ClientMsg, _> = serde_json::from_str(&text);
         let Ok(parsed) = parsed else {
             warn!("bad frame from user {user_id}");
             continue;
@@ -324,13 +338,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User) {
                     .route_event(stream_id, StreamEvent::Head { status, headers })
                     .await;
             }
-            ClientMsg::Chunk {
-                stream_id,
-                data_b64,
-            } => {
-                let data = base64::engine::general_purpose::STANDARD
-                    .decode(data_b64.as_bytes())
-                    .unwrap_or_default();
+            ClientMsg::Chunk { stream_id, data } => {
                 if !data.is_empty() {
                     state.usage.add(user_id, data.len() as i64, 0).await;
                 }

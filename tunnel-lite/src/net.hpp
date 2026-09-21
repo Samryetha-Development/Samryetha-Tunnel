@@ -45,10 +45,17 @@ public:
     /// 设置读超时（毫秒）
     void setReadTimeout(int ms) { sock_.setReadTimeout(ms); }
     bool sendText(const std::string &text, std::string *err = nullptr);
-    /// 阻塞读一条完整文本消息；false = 连接结束或错误
+    /// 发送二进制帧（v3 私有协议）
+    bool sendBinary(const std::string &data, std::string *err = nullptr);
+    /// 阻塞读一条完整消息；false = 连接结束或错误
+    bool recvMessage(std::string &out, bool &isBinary, std::string *err = nullptr);
     bool recvText(std::string &out, std::string *err = nullptr);
     void close();
     bool isOpen() const { return open_; }
+
+    /// 协议字节计数（含 WebSocket 分帧开销），用于基准对比
+    uint64_t txBytes() const { return txBytes_; }
+    uint64_t rxBytes() const { return rxBytes_; }
 
 private:
     Socket sock_;
@@ -57,6 +64,8 @@ private:
     bool tls_ = false;
     bool open_ = false;
     const std::atomic<bool> *stop_ = nullptr;
+    uint64_t txBytes_ = 0;
+    uint64_t rxBytes_ = 0;
 
     bool readExact(void *buf, size_t n);
     bool sendFrame(uint8_t opcode, const std::string &payload);

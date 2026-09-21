@@ -22,6 +22,7 @@ static void ensureWsa() {
 }
 #else
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -79,11 +80,49 @@ bool Socket::connectTo(const std::string &host, int port, std::string *err) {
 #ifdef _WIN32
         SOCKET s = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (s == INVALID_SOCKET) continue;
+        u_long nb = 1;
+        ioctlsocket(s, FIONBIO, &nb);
 #else
         int s = ::socket(p->ai_family, p->ai_socktype, p->ai_protocol);
         if (s < 0) continue;
+        int flags = fcntl(s, F_GETFL, 0);
+        fcntl(s, F_SETFL, flags | O_NONBLOCK);
 #endif
-        if (::connect(s, p->ai_addr, (socklen_t)p->ai_addrlen) == 0) {
+        // 非阻塞 connect + 5s 超时，避免本地服务卡死时线程永久阻塞
+        int rc = ::connect(s, p->ai_addr, (socklen_t)p->ai_addrlen);
+        bool connected = false;
+        if (rc == 0) {
+            connected = true;
+        } else {
+            bool inProgress = false;
+#ifdef _WIN32
+            inProgress = (WSAGetLastError() == WSAEWOULDBLOCK);
+#else
+            inProgress = (errno == EINPROGRESS);
+#endif
+            if (inProgress) {
+                fd_set wf;
+                FD_ZERO(&wf);
+                FD_SET(s, &wf);
+                timeval tv;
+                tv.tv_sec = 5;
+                tv.tv_usec = 0;
+                int sel = ::select((int)s + 1, nullptr, &wf, nullptr, &tv);
+                if (sel > 0) {
+                    int soerr = 0;
+                    socklen_t l = sizeof(soerr);
+                    getsockopt(s, SOL_SOCKET, SO_ERROR, (char *)&soerr, &l);
+                    connected = (soerr == 0);
+                }
+            }
+        }
+        if (connected) {
+#ifdef _WIN32
+            u_long bl = 0;
+            ioctlsocket(s, FIONBIO, &bl);
+#else
+            fcntl(s, F_SETFL, flags);
+#endif
             fd_ = (long long)s;
             int one = 1;
             setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
@@ -314,6 +353,7 @@ bool WebSocket::sendFrame(uint8_t opcode, const std::string &payload) {
     frame.append((char *)mask, 4);
     for (size_t i = 0; i < len; ++i)
         frame += (char)((uint8_t)payload[i] ^ mask[i % 4]);
+    txBytes_ += frame.size();
     return sock_.writeAll(frame.data(), frame.size());
 }
 
@@ -325,8 +365,23 @@ bool WebSocket::sendText(const std::string &text, std::string *err) {
     return true;
 }
 
+bool WebSocket::sendBinary(const std::string &data, std::string *err) {
+    if (!sendFrame(0x2, data)) {
+        if (err) *err = "WebSocket 发送失败";
+        return false;
+    }
+    return true;
+}
+
 bool WebSocket::recvText(std::string &out, std::string *err) {
+    bool bin = false;
+    return recvMessage(out, bin, err);
+}
+
+bool WebSocket::recvMessage(std::string &out, bool &isBinary, std::string *err) {
     std::string message;
+    bool isBin = false;
+    bool haveOp = false;
     for (;;) {
         uint8_t hdr[2];
         if (!readExact(hdr, 2)) {
@@ -337,16 +392,19 @@ bool WebSocket::recvText(std::string &out, std::string *err) {
         const uint8_t opcode = hdr[0] & 0x0F;
         const bool masked = (hdr[1] & 0x80) != 0;
         uint64_t len = hdr[1] & 0x7F;
+        uint64_t extBytes = 0;
         if (len == 126) {
             uint8_t e[2];
             if (!readExact(e, 2)) return false;
             len = ((uint64_t)e[0] << 8) | e[1];
+            extBytes = 2;
         } else if (len == 127) {
             uint8_t e[8];
             if (!readExact(e, 8)) return false;
             len = 0;
             for (int i = 0; i < 8; ++i)
                 len = (len << 8) | e[i];
+            extBytes = 8;
         }
         uint8_t mask[4] = {0, 0, 0, 0};
         if (masked && !readExact(mask, 4))
@@ -355,6 +413,7 @@ bool WebSocket::recvText(std::string &out, std::string *err) {
         payload.resize((size_t)len);
         if (len && !readExact(&payload[0], (size_t)len))
             return false;
+        rxBytes_ += 2 + extBytes + (masked ? 4 : 0) + len;
         if (masked) {
             for (size_t i = 0; i < payload.size(); ++i)
                 payload[i] = (char)((uint8_t)payload[i] ^ mask[i % 4]);
@@ -362,10 +421,16 @@ bool WebSocket::recvText(std::string &out, std::string *err) {
 
         switch (opcode) {
         case 0x1: // text
+        case 0x2: // binary
         case 0x0: // continuation
+            if (!haveOp && opcode != 0x0) {
+                isBin = (opcode == 0x2);
+                haveOp = true;
+            }
             message += payload;
             if (fin) {
-                out = message;
+                out = std::move(message);
+                isBinary = isBin;
                 return true;
             }
             break;

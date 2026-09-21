@@ -1,6 +1,19 @@
 use serde::{Deserialize, Serialize};
+use sqlx::sqlite::SqliteRow;
+use sqlx::{FromRow, Row};
 
-#[derive(Debug, Clone, sqlx::FromRow)]
+/// 手写 FromRow（不依赖 sqlx 编译期宏，避免 proc-macro dylib，也让构建更快）
+macro_rules! row_from_sqlite {
+    ($t:ident { $($f:ident : $ty:ty),* $(,)? }) => {
+        impl<'r> FromRow<'r, SqliteRow> for $t {
+            fn from_row(row: &'r SqliteRow) -> Result<Self, sqlx::Error> {
+                Ok($t { $( $f: row.try_get(stringify!($f))?, )* })
+            }
+        }
+    };
+}
+
+#[derive(Debug, Clone)]
 pub struct User {
     pub id: i64,
     pub email: String,
@@ -13,14 +26,25 @@ pub struct User {
     pub created_at: String,
 }
 
+row_from_sqlite!(User {
+    id: i64,
+    email: String,
+    name: Option<String>,
+    slug: String,
+    role: String,
+    max_tunnels: i64,
+    daily_bytes: i64,
+    disabled: bool,
+    created_at: String,
+});
+
 impl User {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
     }
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
-#[allow(dead_code)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ApiToken {
     pub id: i64,
     #[serde(skip)]
@@ -34,8 +58,19 @@ pub struct ApiToken {
     pub revoked: bool,
 }
 
+row_from_sqlite!(ApiToken {
+    id: i64,
+    user_id: i64,
+    name: String,
+    token_hash: String,
+    prefix: String,
+    created_at: String,
+    last_used_at: Option<String>,
+    revoked: bool,
+});
+
 /// 一条已注册的隧道（持久化配置，实时路由另在 registry 内存里）
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TunnelRow {
     pub id: i64,
     #[serde(skip)]
@@ -50,6 +85,20 @@ pub struct TunnelRow {
     pub created_at: String,
     pub updated_at: String,
 }
+
+row_from_sqlite!(TunnelRow {
+    id: i64,
+    user_id: i64,
+    tunnel_id: String,
+    proto: String,
+    public_host: String,
+    path_prefix: Option<String>,
+    local_addr: Option<String>,
+    visitor_auth: Option<String>,
+    disabled: bool,
+    created_at: String,
+    updated_at: String,
+});
 
 /// 客户端注册时上报的一条隧道
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,7 +128,7 @@ pub struct BasicAuth {
     pub pass: String,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AuditRow {
     pub id: i64,
     pub at: String,
@@ -90,9 +139,25 @@ pub struct AuditRow {
     pub ip: Option<String>,
 }
 
-#[derive(Debug, Clone, sqlx::FromRow, Serialize)]
+row_from_sqlite!(AuditRow {
+    id: i64,
+    at: String,
+    actor: Option<String>,
+    action: String,
+    target: Option<String>,
+    detail: Option<String>,
+    ip: Option<String>,
+});
+
+#[derive(Debug, Clone, Serialize)]
 pub struct UsageRow {
     pub day: String,
     pub bytes: i64,
     pub requests: i64,
 }
+
+row_from_sqlite!(UsageRow {
+    day: String,
+    bytes: i64,
+    requests: i64,
+});

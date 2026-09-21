@@ -1,4 +1,5 @@
 mod auth;
+mod binproto;
 mod config;
 mod db;
 mod models;

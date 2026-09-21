@@ -1,6 +1,5 @@
 use crate::auth::AppState;
 use crate::protocol::{ServerMsg, StreamEvent};
-use base64::Engine;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -98,7 +97,7 @@ async fn handle_conn(
         method: String::new(),
         path: String::new(),
         headers: Default::default(),
-        body_b64: String::new(),
+        body: Vec::new(),
     };
     if !state.registry.send_to_user(user_id, open).await {
         state.registry.take_pending(stream_id).await;
@@ -132,14 +131,13 @@ async fn handle_conn(
             Ok(0) => break,
             Ok(n) => {
                 state.usage.add(user_id, n as i64, 0).await;
-                let data = base64::engine::general_purpose::STANDARD.encode(&buf[..n]);
                 state
                     .registry
                     .send_to_user(
                         user_id,
                         ServerMsg::Chunk {
                             stream_id,
-                            data_b64: data,
+                            data: buf[..n].to_vec(),
                         },
                     )
                     .await;
