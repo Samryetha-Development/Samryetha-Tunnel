@@ -16,8 +16,9 @@ Self-hosted ngrok alternative: Rust tunnel server (single-443, Caddy-friendly) +
 
 | 目录 | 说明 |
 | --- | --- |
-| `tunnel-server/` | Rust 服务端（tokio + axum），控制通道 + 访客分发 |
-| `TunnelMac/` | Swift 客户端：`TunnelCore` 协议库 + `tunnel-cli` 联调工具 + `TunnelApp` 图形界面 |
+| `tunnel-server/` | Rust 服务端（tokio + axum）：控制通道、多租户、OIDC 登录、配额审计、访客分发、纯 IP TCP 中转 |
+| `tunnel-cpp/` | 跨平台 C++ 客户端（同一份代码编 macOS/Windows）：核心静态库 + CLI + Qt 6 图形界面 |
+| `TunnelMac/` | 旧 Swift 客户端，**已停止维护**，仅作历史参考 |
 
 ## 快速开始
 
@@ -30,21 +31,17 @@ PORT=18080 SERVER_TOKEN=换成强随机串 BASE_DOMAIN=frp.xxx.com cargo run --r
 
 Caddy 配置见 `tunnel-server/Caddyfile.example`（主域名 + 泛域名反代到 `127.0.0.1:18080`）。
 
-**客户端 CLI**（见 `TunnelMac/README.md`）：
+**客户端（C++，跨平台）**：
 
 ```bash
-cd TunnelMac
-swift build
-.build/debug/tunnel-cli --server wss://frp.xxx.com/tunnel --token <同服务端> \
-  --client-id mac-alice --config example-config.json
+cd tunnel-cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release   # macOS 自动探测 Homebrew Qt
+cmake --build build -j
+./build/cli/tunnel-cli --server ws://127.0.0.1:18090/tunnel --dev-token you@example.com \
+  --tunnel id=web,path=/web,local=127.0.0.1:8080
 ```
 
-**客户端图形界面**：
-
-```bash
-cd TunnelMac
-./build-app.sh        # 产物：TunnelApp.app，双击运行（macOS 14+）
-```
+Windows 构建与 GUI 用法见 `tunnel-cpp/README.md`。
 
 ## v1 范围与限制
 

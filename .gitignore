@@ -4,6 +4,7 @@ target/
 
 # Swift / Xcode
 .build/
+build/
 *.xcodeproj/
 xcuserdata/
 DerivedData/
