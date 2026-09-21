@@ -5,7 +5,7 @@
 class QCheckBox;
 class QComboBox;
 class QLineEdit;
-class QPlainTextEdit;
+class QTextEdit;
 
 namespace gui {
 
@@ -21,7 +21,7 @@ private:
     AppState *st_;
     QComboBox *level_;
     QLineEdit *search_;
-    QPlainTextEdit *view_;
+    QTextEdit *view_;
     QCheckBox *autoScroll_;
 };
 

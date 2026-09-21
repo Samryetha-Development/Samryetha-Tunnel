@@ -4,7 +4,6 @@
 
 class QLabel;
 class QPushButton;
-class QTableWidget;
 
 namespace gui {
 
@@ -25,8 +24,11 @@ private:
     QLabel *vReqs_ = nullptr;
     QLabel *vRate_ = nullptr;
     QLabel *vBytes_ = nullptr;
-    QTableWidget *table_ = nullptr;
+    QWidget *cardsHost_ = nullptr;
     QPushButton *connectBtn_ = nullptr;
+
+    void rebuildCards(bool connected);
+    QWidget *buildTunnelCard(int index, bool connected);
 };
 
 } // namespace gui

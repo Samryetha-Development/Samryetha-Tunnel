@@ -1,5 +1,7 @@
 #include "StatsPage.hpp"
 #include "AppState.hpp"
+#include "Theme.hpp"
+#include "Ui.hpp"
 
 #include <QBarCategoryAxis>
 #include <QBarSeries>
@@ -7,7 +9,6 @@
 #include <QChart>
 #include <QChartView>
 #include <QDateTime>
-#include <QFrame>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -18,44 +19,65 @@
 
 namespace gui {
 
-static QFrame *tile(const QString &label, QLabel **out) {
-    auto *f = new QFrame;
-    f->setObjectName("tile");
-    auto *v = new QVBoxLayout(f);
-    v->setContentsMargins(14, 12, 14, 12);
-    v->setSpacing(4);
-    auto *l = new QLabel(label);
-    l->setObjectName("cardLabel");
-    auto *val = new QLabel("—");
-    val->setObjectName("cardValue");
-    v->addWidget(l);
-    v->addWidget(val);
-    *out = val;
-    return f;
+static void styleChart(QChart *chart, const QColor &accent, bool verticalGrid) {
+    chart->setBackgroundVisible(false);
+    chart->setPlotAreaBackgroundVisible(false);
+    chart->legend()->hide();
+    chart->setTitleBrush(QBrush(QColor("#93a1b5")));
+    chart->setMargins(QMargins(4, 4, 4, 4));
+    const auto axes = chart->axes();
+    for (QAbstractAxis *a : axes) {
+        if (auto *va = qobject_cast<QValueAxis *>(a)) {
+            va->setLabelsColor(QColor("#7d8ba1"));
+            va->setGridLineColor(QColor("#1c2634"));
+            va->setLineVisible(false);
+            va->setGridLineVisible(verticalGrid);
+        } else if (auto *ca = qobject_cast<QBarCategoryAxis *>(a)) {
+            ca->setLabelsColor(QColor("#7d8ba1"));
+            ca->setGridLineVisible(false);
+            ca->setLineVisible(false);
+        }
+    }
+    Q_UNUSED(accent);
 }
 
 StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(18, 18, 18, 18);
-    root->setSpacing(12);
+    root->setContentsMargins(20, 20, 20, 20);
+    root->setSpacing(14);
 
     auto *tiles = new QHBoxLayout;
-    tiles->setSpacing(10);
-    tiles->addWidget(tile(QStringLiteral("累计请求"), &vReqs_));
-    tiles->addWidget(tile(QStringLiteral("成功率"), &vRate_));
-    tiles->addWidget(tile(QStringLiteral("平均延迟"), &vLatency_));
-    tiles->addWidget(tile(QStringLiteral("下行流量"), &vBytes_));
+    tiles->setSpacing(12);
+    tiles->addWidget(ui::statTile(QStringLiteral("累计请求"), theme::kAccent2, &vReqs_));
+    tiles->addWidget(ui::statTile(QStringLiteral("成功率"), theme::kAccent, &vRate_));
+    tiles->addWidget(ui::statTile(QStringLiteral("平均延迟"), theme::kPurple, &vLatency_));
+    tiles->addWidget(ui::statTile(QStringLiteral("下行流量"), theme::kWarn, &vBytes_));
     root->addLayout(tiles);
 
+    auto *minuteCard = ui::card();
+    auto *mc = new QVBoxLayout(minuteCard);
+    mc->setContentsMargins(14, 12, 14, 10);
     minuteChart_ = new QChartView;
-    minuteChart_->setMinimumHeight(180);
-    root->addWidget(minuteChart_);
+    minuteChart_->setMinimumHeight(190);
+    minuteChart_->setRenderHint(QPainter::Antialiasing);
+    mc->addWidget(minuteChart_);
+    root->addWidget(minuteCard);
 
     auto *mid = new QHBoxLayout;
-    tunnelChart_ = new QChartView;
-    tunnelChart_->setMinimumHeight(180);
-    mid->addWidget(tunnelChart_, 1);
+    mid->setSpacing(12);
 
+    auto *tunnelCard = ui::card();
+    auto *tc = new QVBoxLayout(tunnelCard);
+    tc->setContentsMargins(14, 12, 14, 10);
+    tunnelChart_ = new QChartView;
+    tunnelChart_->setRenderHint(QPainter::Antialiasing);
+    tc->addWidget(tunnelChart_);
+    mid->addWidget(tunnelCard, 1);
+
+    auto *recentCard = ui::card();
+    auto *rc = new QVBoxLayout(recentCard);
+    rc->setContentsMargins(14, 12, 14, 10);
+    rc->addWidget(ui::sectionTitle(QStringLiteral("最近请求")));
     recent_ = new QTableWidget;
     recent_->setColumnCount(5);
     recent_->setHorizontalHeaderLabels({QStringLiteral("时间"), QStringLiteral("隧道"),
@@ -63,8 +85,11 @@ StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
                                         QStringLiteral("延迟")});
     recent_->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
     recent_->verticalHeader()->setVisible(false);
+    recent_->setShowGrid(false);
+    recent_->setAlternatingRowColors(true);
     recent_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    mid->addWidget(recent_, 1);
+    rc->addWidget(recent_, 1);
+    mid->addWidget(recentCard, 1);
     root->addLayout(mid, 1);
 
     chartTimer_ = new QTimer(this);
@@ -80,7 +105,6 @@ StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
 void StatsPage::refreshCharts() {
     const auto &events = st_->events();
 
-    // 最近 30 分钟，每分钟请求数
     QVector<int> buckets(30, 0);
     const QDateTime now = QDateTime::currentDateTime();
     const QDateTime start = now.addSecs(-29 * 60);
@@ -93,6 +117,8 @@ void StatsPage::refreshCharts() {
             buckets[idx] += 1;
     }
     auto *set = new QBarSet(QStringLiteral("请求"));
+    set->setColor(QColor("#3ddc84"));
+    set->setBorderColor(Qt::transparent);
     QStringList cats;
     for (int i = 0; i < 30; ++i) {
         *set << buckets[i];
@@ -104,51 +130,50 @@ void StatsPage::refreshCharts() {
     auto *chart = new QChart;
     chart->addSeries(series);
     chart->setTitle(QStringLiteral("最近 30 分钟 · 每分钟请求"));
-    chart->setBackgroundVisible(false);
-    chart->legend()->hide();
     auto *ax = new QBarCategoryAxis;
     ax->append(cats);
     chart->addAxis(ax, Qt::AlignBottom);
     series->attachAxis(ax);
     auto *ay = new QValueAxis;
     ay->setLabelFormat("%d");
+    ay->setRange(0, std::max(1, *std::max_element(buckets.begin(), buckets.end())) * 1.2);
     chart->addAxis(ay, Qt::AlignLeft);
     series->attachAxis(ay);
+    styleChart(chart, QColor("#3ddc84"), true);
     minuteChart_->setChart(chart);
 
-    // 按隧道分布
     QMap<QString, int> counts;
     for (const auto &e : events)
         counts[e.tunnelId] += 1;
     auto *tset = new QBarSet(QStringLiteral("请求"));
+    tset->setColor(QColor("#4c8dff"));
+    tset->setBorderColor(Qt::transparent);
     QStringList tcats;
+    int maxCount = 1;
     for (auto it = counts.constBegin(); it != counts.constEnd(); ++it) {
         *tset << it.value();
         tcats << it.key();
+        maxCount = std::max(maxCount, it.value());
     }
     auto *tseries = new QBarSeries;
     tseries->append(tset);
     auto *tchart = new QChart;
     tchart->addSeries(tseries);
     tchart->setTitle(QStringLiteral("按隧道分布"));
-    tchart->setBackgroundVisible(false);
-    tchart->legend()->hide();
     auto *tax = new QBarCategoryAxis;
     tax->append(tcats);
     tchart->addAxis(tax, Qt::AlignBottom);
     tseries->attachAxis(tax);
     auto *tay = new QValueAxis;
     tay->setLabelFormat("%d");
+    tay->setRange(0, maxCount * 1.2);
     tchart->addAxis(tay, Qt::AlignLeft);
     tseries->attachAxis(tay);
+    styleChart(tchart, QColor("#4c8dff"), true);
     tunnelChart_->setChart(tchart);
 
-    // 汇总
-    int total = events.size();
-    int ok = 0;
+    int total = events.size(), ok = 0, latency = 0, n = 0;
     qint64 bytes = 0;
-    int latency = 0;
-    int n = 0;
     for (const auto &e : events) {
         if (e.status < 500)
             ++ok;
@@ -167,7 +192,7 @@ void StatsPage::refreshCharts() {
 
 void StatsPage::refreshTable() {
     const auto &events = st_->events();
-    const int rows = qMin(30, events.size());
+    const int rows = qMin(30, (int)events.size());
     recent_->setRowCount(rows);
     for (int i = 0; i < rows; ++i) {
         const auto &e = events[events.size() - 1 - i];

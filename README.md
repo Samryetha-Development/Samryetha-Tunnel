@@ -18,6 +18,7 @@ Self-hosted ngrok alternative: Rust tunnel server (single-443, Caddy-friendly) +
 | --- | --- |
 | `tunnel-server/` | Rust 服务端（tokio + axum）：控制通道、多租户、OIDC 登录、配额审计、访客分发、纯 IP TCP 中转 |
 | `tunnel-cpp/` | 跨平台 C++ 客户端（同一份代码编 macOS/Windows）：核心静态库 + CLI + Qt 6 图形界面 |
+| `tunnel-lite/` | **无 Qt 依赖**的轻量 CLI（~160KB、~2–3MB 内存），适合服务器/容器常驻 |
 | `TunnelMac/` | 旧 Swift 客户端，**已停止维护**，仅作历史参考 |
 
 ## 快速开始
