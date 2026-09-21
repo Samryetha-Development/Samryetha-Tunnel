@@ -176,6 +176,62 @@ struct Stream {
 static std::mutex g_streamsMtx;
 static std::map<uint64_t, std::shared_ptr<Stream>> g_streams;
 
+// ---------------- 本地服务连接池（keep-alive 复用，省掉每请求握手）----------------
+
+struct IdleConn {
+    std::shared_ptr<Socket> sock;
+    std::chrono::steady_clock::time_point at;
+};
+
+class LocalPool {
+public:
+    std::shared_ptr<Socket> acquire(const std::string &addr, bool &reused) {
+        reused = false;
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> l(m_);
+        auto it = idle_.find(addr);
+        if (it != idle_.end()) {
+            auto &v = it->second;
+            while (!v.empty()) {
+                IdleConn c = v.back();
+                v.pop_back();
+                if (now - c.at > std::chrono::seconds(kIdleSecs))
+                    continue; // 空闲过久，丢弃
+                reused = true;
+                return c.sock;
+            }
+        }
+        return nullptr;
+    }
+    void release(const std::string &addr, const std::shared_ptr<Socket> &s) {
+        std::lock_guard<std::mutex> l(m_);
+        auto &v = idle_[addr];
+        if ((int)v.size() >= kMaxIdle)
+            return; // 超上限，直接析构关闭
+        v.push_back({s, std::chrono::steady_clock::now()});
+    }
+    void purge() {
+        const auto now = std::chrono::steady_clock::now();
+        std::lock_guard<std::mutex> l(m_);
+        for (auto &kv : idle_) {
+            auto &v = kv.second;
+            v.erase(std::remove_if(v.begin(), v.end(),
+                                   [&](const IdleConn &c) {
+                                       return now - c.at > std::chrono::seconds(kIdleSecs);
+                                   }),
+                    v.end());
+        }
+    }
+
+private:
+    static constexpr int kIdleSecs = 30;
+    static constexpr int kMaxIdle = 8;
+    std::mutex m_;
+    std::map<std::string, std::vector<IdleConn>> idle_;
+};
+
+static LocalPool g_localPool;
+
 // ---------------- 工作线程池（避免每个请求创建线程）----------------
 
 class Pool {
@@ -242,24 +298,16 @@ static bool readHttpHead(Socket &s, std::string &head) {
     return false;
 }
 
-static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st,
-                             const OpenStream &req) {
-    const auto t0 = std::chrono::steady_clock::now();
-    long long sent = 0;
+enum class HttpOutcome { Done, Retry };
 
-    std::string host;
-    int port;
-    splitAddr(st->localAddr, host, port);
-    std::string err;
-    if (!st->sock.connectTo(host, port, &err)) {
-        log("err", st->tunnelId, "本地连接失败: " + err);
-        sess->send(encAbort(g_mode, st->id, err));
-        return;
-    }
+static HttpOutcome runHttpOnce(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st,
+                               const OpenStream &req, const std::shared_ptr<Socket> &conn,
+                               long long &sent) {
+    const auto t0 = std::chrono::steady_clock::now();
 
     std::string r = req.method + " " + req.path + " HTTP/1.1\r\n";
     r += "Host: " + st->localAddr + "\r\n";
-    r += "Connection: close\r\n";
+    r += "Connection: keep-alive\r\n";
     for (const auto &kv : req.headers) {
         std::string lk = kv.first;
         std::transform(lk.begin(), lk.end(), lk.begin(), ::tolower);
@@ -272,20 +320,15 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
         r += "Content-Length: " + std::to_string(req.body.size()) + "\r\n";
     r += "\r\n";
     r += req.body;
-    if (!st->sock.writeAll(r.data(), r.size())) {
-        log("err", st->tunnelId, "写本地请求失败");
-        return;
-    }
+    if (!conn->writeAll(r.data(), r.size()))
+        return HttpOutcome::Retry;
 
     std::string head;
-    if (!readHttpHead(st->sock, head)) {
-        sess->send(encAbort(g_mode, st->id, "本地无响应"));
-        return;
-    }
+    if (!readHttpHead(*conn, head))
+        return HttpOutcome::Retry;
 
     auto lineEnd = head.find("\r\n");
-    std::string statusLine = head.substr(0, lineEnd);
-    std::istringstream ls(statusLine);
+    std::istringstream ls(head.substr(0, lineEnd));
     std::string http, reason;
     int status = 0;
     ls >> http >> status;
@@ -293,6 +336,8 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
 
     std::map<std::string, std::string> headers;
     bool chunked = false;
+    bool connClose = false;
+    bool explicitKeepAlive = false;
     long long contentLength = -1;
     size_t pos = lineEnd + 2;
     while (pos < head.size()) {
@@ -312,11 +357,22 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
                 chunked = true;
             if (lk == "content-length")
                 contentLength = std::atoll(v.c_str());
+            if (lk == "connection") {
+                if (v.find("close") != std::string::npos)
+                    connClose = true;
+                if (v.find("keep-alive") != std::string::npos)
+                    explicitKeepAlive = true;
+            }
             if (lk != "content-length" && lk != "connection" && lk != "transfer-encoding")
                 headers[k] = v;
         }
         pos = e + 2;
     }
+
+    // 只有能精确判定报文结尾、且对端愿意保持连接时，连接才可复用（否则会串包/复用到已关闭连接）
+    const bool http11 = http.rfind("HTTP/1.1", 0) == 0;
+    bool keepAlive =
+        !connClose && (chunked || contentLength >= 0) && (http11 || explicitKeepAlive);
 
     sess->send(encHead(g_mode, st->id, status, headers));
 
@@ -334,7 +390,7 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
             std::string sizeLine;
             char c;
             while (true) {
-                long rr = st->sock.readSome(&c, 1);
+                long rr = conn->readSome(&c, 1);
                 if (rr <= 0)
                     break;
                 if (c == '\n')
@@ -345,41 +401,94 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
             if (sizeLine.empty())
                 break;
             long sz = std::strtol(sizeLine.c_str(), nullptr, 16);
-            if (sz <= 0)
+            if (sz <= 0) {
+                // 读完 trailer（若有）才算完整
+                std::string tail;
+                char cc;
+                while (true) {
+                    long rr = conn->readSome(&cc, 1);
+                    if (rr <= 0)
+                        break;
+                    tail += cc;
+                    if (tail.size() >= 4 && tail.compare(tail.size() - 4, 4, "\r\n\r\n") == 0)
+                        break;
+                    if (tail.size() >= 2 && tail == "\r\n")
+                        break;
+                }
                 break;
+            }
             long got = 0;
             while (got < sz) {
-                long rr = st->sock.readSome(buf, std::min<long>(sizeof(buf), sz - got));
+                long rr = conn->readSome(buf, std::min<long>(sizeof(buf), sz - got));
                 if (rr <= 0)
                     break;
                 sendChunk(std::string(buf, (size_t)rr));
                 got += rr;
             }
             char crlf[2];
-            st->sock.readSome(crlf, 2);
+            conn->readSome(crlf, 2);
         }
-    } else {
-        while (true) {
-            if (contentLength >= 0 && total >= contentLength)
+    } else if (contentLength >= 0) {
+        while (total < contentLength) {
+            size_t want = std::min<size_t>(sizeof(buf), (size_t)(contentLength - total));
+            long rr = conn->readSome(buf, want);
+            if (rr <= 0) {
+                keepAlive = false; // 没读满，连接状态不可信
                 break;
-            size_t want = sizeof(buf);
-            if (contentLength >= 0)
-                want = std::min<size_t>(sizeof(buf), (size_t)(contentLength - total));
-            long rr = st->sock.readSome(buf, want);
-            if (rr <= 0)
-                break;
+            }
             sendChunk(std::string(buf, (size_t)rr));
             total += rr;
         }
+    } else {
+        long rr;
+        while ((rr = conn->readSome(buf, sizeof(buf))) > 0)
+            sendChunk(std::string(buf, (size_t)rr));
+        keepAlive = false; // close-delimited，不可复用
     }
 
     sess->send(encEnd(g_mode, st->id));
+
+    if (keepAlive)
+        g_localPool.release(st->localAddr, conn);
 
     const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - t0)
                         .count();
     log("info", st->tunnelId,
-        std::to_string(status) + " · " + fmtBytes(sent) + " · " + std::to_string(ms) + "ms");
+        std::to_string(status) + " · " + fmtBytes(sent) + " · " + std::to_string(ms) + "ms" +
+            (keepAlive ? " · reuse" : ""));
+    return HttpOutcome::Done;
+}
+
+static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st,
+                             const OpenStream &req) {
+    long long sent = 0;
+    std::string host;
+    int port;
+    splitAddr(st->localAddr, host, port);
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool reused = false;
+        std::shared_ptr<Socket> conn = g_localPool.acquire(st->localAddr, reused);
+        if (!conn) {
+            conn = std::make_shared<Socket>();
+            std::string err;
+            if (!conn->connectTo(host, port, &err)) {
+                log("err", st->tunnelId, "本地连接失败: " + err);
+                sess->send(encAbort(g_mode, st->id, err));
+                return;
+            }
+        }
+        const HttpOutcome out = runHttpOnce(sess, st, req, conn, sent);
+        if (out == HttpOutcome::Done)
+            return;
+        if (reused && attempt == 0) {
+            log("warn", st->tunnelId, "复用的本地连接已失效，改用新连接重试");
+            continue;
+        }
+        sess->send(encAbort(g_mode, st->id, "本地无响应"));
+        return;
+    }
 }
 
 static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st) {
