@@ -41,6 +41,8 @@ pub struct Config {
     pub max_streams_per_user: i64,
     pub rate_per_sec: f64,
     pub rate_burst: f64,
+    /// 路径隧道命名空间前缀（如 "/u" -> /u/<slug>/<tunnel>）；空串则 /<slug>/<tunnel>
+    pub path_ns: String,
 }
 
 fn var(key: &str, default: &str) -> String {
@@ -49,6 +51,21 @@ fn var(key: &str, default: &str) -> String {
 
 fn var_opt(key: &str) -> Option<String> {
     env::var(key).ok().filter(|v| !v.trim().is_empty())
+}
+
+/// 规整路径命名空间："" 或 "/u"（保证前导斜杠、去掉尾部斜杠）
+fn normalize_ns(raw: &str) -> String {
+    let mut s = raw.trim().to_string();
+    if s.is_empty() || s == "/" {
+        return String::new();
+    }
+    if !s.starts_with('/') {
+        s = format!("/{s}");
+    }
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    s
 }
 
 impl Config {
@@ -100,6 +117,7 @@ impl Config {
             max_streams_per_user: var("MAX_STREAMS_PER_USER", "64").parse().unwrap_or(64),
             rate_per_sec: var("RATE_PER_SEC", "50").parse().unwrap_or(50.0),
             rate_burst: var("RATE_BURST", "100").parse().unwrap_or(100.0),
+            path_ns: normalize_ns(&var("PATH_NS", "")),
         }
     }
 

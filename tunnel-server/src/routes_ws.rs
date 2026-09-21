@@ -122,16 +122,17 @@ async fn prepare(
                 path_prefix = None;
                 public_url = format!("https://{}.{}", eff, state.cfg.base_domain);
             } else {
+                let base = format!("{}/{}", state.cfg.path_ns, slug); // PATH_NS 为空时即 /<slug>
                 let eff_path = match def.path_prefix.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     Some(p) => {
                         let p = crate::registry::Registry::normalize_prefix(p);
-                        if p == format!("/{slug}") || p.starts_with(&format!("/{slug}/")) {
+                        if p == base || p.starts_with(&format!("{base}/")) {
                             p
                         } else {
-                            format!("/{slug}{p}")
+                            format!("{base}{p}")
                         }
                     }
-                    None => format!("/{slug}/{tunnel_id}"),
+                    None => format!("{base}/{tunnel_id}"),
                 };
                 public_host = String::new();
                 path_prefix = Some(eff_path.clone());
