@@ -43,15 +43,19 @@ static void styleChart(QChart *chart, const QColor &accent, bool verticalGrid) {
 
 StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(14);
+    root->setContentsMargins(34, 30, 34, 24);
+    root->setSpacing(0);
+
+    root->addWidget(ui::eyebrow(QStringLiteral("analytics")));
+    root->addWidget(ui::pageTitle(QStringLiteral("流量")));
+    root->addSpacing(22);
 
     auto *tiles = new QHBoxLayout;
-    tiles->setSpacing(12);
-    tiles->addWidget(ui::statTile(QStringLiteral("累计请求"), theme::kAccent2, &vReqs_));
-    tiles->addWidget(ui::statTile(QStringLiteral("成功率"), theme::kAccent, &vRate_));
-    tiles->addWidget(ui::statTile(QStringLiteral("平均延迟"), theme::kPurple, &vLatency_));
-    tiles->addWidget(ui::statTile(QStringLiteral("下行流量"), theme::kWarn, &vBytes_));
+    tiles->setSpacing(60);
+    tiles->addWidget(ui::statTile(QStringLiteral("累计请求"), "#4c8dff", &vReqs_));
+    tiles->addWidget(ui::statTile(QStringLiteral("成功率"), "#3ddc84", &vRate_));
+    tiles->addWidget(ui::statTile(QStringLiteral("平均延迟"), "#a78bfa", &vLatency_));
+    tiles->addWidget(ui::statTile(QStringLiteral("下行流量"), "#f5b74e", &vBytes_));
     root->addLayout(tiles);
 
     auto *minuteCard = ui::card();
@@ -64,7 +68,8 @@ StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     root->addWidget(minuteCard);
 
     auto *mid = new QHBoxLayout;
-    mid->setSpacing(12);
+    mid->setSpacing(40);
+    root->addSpacing(26);
 
     auto *tunnelCard = ui::card();
     auto *tc = new QVBoxLayout(tunnelCard);
@@ -77,7 +82,7 @@ StatsPage::StatsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *recentCard = ui::card();
     auto *rc = new QVBoxLayout(recentCard);
     rc->setContentsMargins(14, 12, 14, 10);
-    rc->addWidget(ui::sectionTitle(QStringLiteral("最近请求")));
+    rc->addWidget(ui::eyebrow(QStringLiteral("recent")));
     recent_ = new QTableWidget;
     recent_->setColumnCount(5);
     recent_->setHorizontalHeaderLabels({QStringLiteral("时间"), QStringLiteral("隧道"),

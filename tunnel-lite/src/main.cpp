@@ -14,6 +14,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <fstream>
@@ -26,11 +27,35 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#define ISATTY _isatty
+#define FILENO _fileno
+#else
+#include <unistd.h>
+#define ISATTY isatty
+#define FILENO fileno
+#endif
+
 using namespace lite;
 
 static std::atomic<bool> g_stop{false};
 
 // ---------------- 工具 ----------------
+
+static bool colorEnabled() {
+    static int c = -1;
+    if (c < 0)
+        c = (ISATTY(FILENO(stdout)) && !std::getenv("NO_COLOR")) ? 1 : 0;
+    return c == 1;
+}
+
+static const char *levelColor(const std::string &l) {
+    if (l == "ok") return "\033[32m";
+    if (l == "warn") return "\033[33m";
+    if (l == "err") return "\033[31m";
+    return "\033[90m";
+}
 
 static std::string nowStr() {
     char buf[32];
@@ -48,7 +73,23 @@ static std::string nowStr() {
 static void log(const std::string &level, const std::string &src, const std::string &msg) {
     static std::mutex m;
     std::lock_guard<std::mutex> l(m);
-    std::cout << "[" << nowStr() << "][" << level << "][" << src << "] " << msg << std::endl;
+    if (colorEnabled())
+        std::cout << "\033[90m[" << nowStr() << "]\033[0m " << levelColor(level) << level
+                  << "\033[0m \033[36m" << src << "\033[0m " << msg << "\n";
+    else
+        std::cout << "[" << nowStr() << "][" << level << "][" << src << "] " << msg << "\n";
+    std::cout.flush();
+}
+
+static std::string fmtBytes(long long b) {
+    char buf[64];
+    if (b < 1024)
+        snprintf(buf, sizeof(buf), "%lldB", b);
+    else if (b < 1024 * 1024)
+        snprintf(buf, sizeof(buf), "%.1fKB", b / 1024.0);
+    else
+        snprintf(buf, sizeof(buf), "%.2fMB", b / 1024.0 / 1024.0);
+    return buf;
 }
 
 struct TunnelDef {
@@ -172,6 +213,8 @@ static bool readHttpHead(Socket &s, std::string &head) {
 
 static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st,
                              const J &open) {
+    const auto t0 = std::chrono::steady_clock::now();
+    long long sent = 0;
     const std::string method = open.str("method", "GET");
     const std::string path = open.str("path", "/");
     const std::string body = b64decodeStr(open.str("body_b64"));
@@ -271,6 +314,7 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
     auto sendChunk = [&](const std::string &data) {
         if (data.empty())
             return;
+        sent += (long long)data.size();
         J c = J::O();
         c.set("type", J::S("chunk"));
         c.set("stream_id", J::N((double)st->id));
@@ -329,9 +373,17 @@ static void handleHttpStream(const std::shared_ptr<Session> &sess, const std::sh
     end.set("type", J::S("end"));
     end.set("stream_id", J::N((double)st->id));
     sess->send(end.dump());
+
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    log("info", st->tunnelId,
+        std::to_string(status) + " · " + fmtBytes(sent) + " · " + std::to_string(ms) + "ms");
 }
 
 static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::shared_ptr<Stream> &st) {
+    const auto t0 = std::chrono::steady_clock::now();
+    long long total = 0;
     std::string host;
     int port;
     splitAddr(st->localAddr, host, port);
@@ -356,6 +408,7 @@ static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::sha
     char buf[16384];
     long r;
     while (!st->closed && (r = st->sock.readSome(buf, sizeof(buf))) > 0) {
+        total += r;
         J c = J::O();
         c.set("type", J::S("chunk"));
         c.set("stream_id", J::N((double)st->id));
@@ -369,6 +422,10 @@ static void handleTcpStream(const std::shared_ptr<Session> &sess, const std::sha
         e.set("stream_id", J::N((double)st->id));
         sess->send(e.dump());
     }
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+    log("info", st->tunnelId, "closed · " + fmtBytes(total) + " · " + std::to_string(ms) + "ms");
     std::lock_guard<std::mutex> g(g_streamsMtx);
     g_streams.erase(st->id);
 }
@@ -390,6 +447,8 @@ static bool runOnce(const std::string &server, const std::string &token, const s
         return false;
     }
     log("ok", "net", "控制通道已建立，注册 " + std::to_string(tunnels.size()) + " 条隧道");
+    sess->ws->setReadTimeout(1000);
+    sess->ws->setStopFlag(&g_stop);
     sess->send(buildRegister(clientId, tunnels));
 
     while (!g_stop) {
@@ -407,11 +466,14 @@ static bool runOnce(const std::string &server, const std::string &token, const s
             p.set("type", J::S("pong"));
             sess->send(p.dump());
         } else if (type == "register_ack") {
+            const std::string aerr = m.str("error");
+            if (!aerr.empty())
+                log("warn", "net", "服务端提示: " + aerr);
             if (m.boolean("ok")) {
                 for (const auto &t : m.at("tunnels").a)
                     log("ok", t.str("tunnel_id"), "公网地址 " + t.str("public_url"));
             } else {
-                log("err", "net", "注册失败: " + m.str("error"));
+                log("err", "net", "注册失败");
             }
         } else if (type == "open_stream") {
             auto st = std::make_shared<Stream>();
@@ -490,16 +552,20 @@ static bool runOnce(const std::string &server, const std::string &token, const s
 
 // ---------------- main ----------------
 
+static const char *kVersion = "0.3.0";
+
 static void usage() {
     std::cout <<
-        "tunnel-lite - 轻量跨平台客户端（无 Qt）\n\n"
+        "tunnel-lite " << kVersion << " - 轻量跨平台客户端（无 Qt）\n\n"
         "用法:\n"
         "  tunnel-lite --server <ws://|wss://.../tunnel> [--token T | --dev-token EMAIL]\n"
-        "              [--client-id ID] [--config file.json]\n"
+        "              [--client-id ID] [--config file.json] [--no-reconnect]\n"
         "              --tunnel id=ID,proto=http|tcp,sub=..,path=..,local=host:port（可重复）\n\n"
         "示例:\n"
         "  tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token a@b.com \\\n"
-        "              --tunnel id=web,path=/web,local=127.0.0.1:8080\n";
+        "              --tunnel id=web,path=/web,local=127.0.0.1:8080\n"
+        "  tunnel-lite --server ws://47.103.21.5:18091/tunnel --token tun_xxx \\\n"
+        "              --tunnel id=ssh,proto=tcp,local=127.0.0.1:22\n";
 }
 
 int main(int argc, char **argv) {
@@ -515,6 +581,9 @@ int main(int argc, char **argv) {
         };
         if (a == "-h" || a == "--help") {
             usage();
+            return 0;
+        } else if (a == "-v" || a == "--version") {
+            std::cout << "tunnel-lite " << kVersion << "\n";
             return 0;
         } else if (a == "-s" || a == "--server") next(server);
         else if (a == "-t" || a == "--token") next(token);

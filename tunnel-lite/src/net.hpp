@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <utility>
@@ -17,8 +18,10 @@ public:
 
     bool connectTo(const std::string &host, int port, std::string *err = nullptr);
     bool startTls(const std::string &host, std::string *err = nullptr);
+    /// 设置读超时（毫秒），用于让 Ctrl+C 能及时退出
+    void setReadTimeout(int ms);
 
-    /// >0 读到字节，0 = 对端关闭，-1 = 错误
+    /// >0 读到字节，0 = 对端关闭，-1 = 错误，-2 = 超时
     long readSome(void *buf, size_t n);
     bool writeAll(const void *buf, size_t n);
     void shutdownAll();
@@ -37,6 +40,10 @@ class WebSocket {
 public:
     ~WebSocket();
     bool connect(const std::string &url, const std::string &bearerToken, std::string *err);
+    /// 设置退出标志：读超时时检查，Ctrl+C 可立即返回
+    void setStopFlag(const std::atomic<bool> *f) { stop_ = f; }
+    /// 设置读超时（毫秒）
+    void setReadTimeout(int ms) { sock_.setReadTimeout(ms); }
     bool sendText(const std::string &text, std::string *err = nullptr);
     /// 阻塞读一条完整文本消息；false = 连接结束或错误
     bool recvText(std::string &out, std::string *err = nullptr);
@@ -49,6 +56,7 @@ private:
     int port_ = 80;
     bool tls_ = false;
     bool open_ = false;
+    const std::atomic<bool> *stop_ = nullptr;
 
     bool readExact(void *buf, size_t n);
     bool sendFrame(uint8_t opcode, const std::string &payload);

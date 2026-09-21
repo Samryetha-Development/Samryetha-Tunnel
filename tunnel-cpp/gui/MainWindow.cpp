@@ -9,7 +9,6 @@
 #include "tunnel/Client.hpp"
 
 #include <QFrame>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QListWidget>
@@ -31,64 +30,51 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
     // ---------- 侧栏 ----------
     auto *sidebar = new QWidget;
     sidebar->setObjectName("sidebar");
-    sidebar->setFixedWidth(238);
+    sidebar->setFixedWidth(232);
     auto *sv = new QVBoxLayout(sidebar);
-    sv->setContentsMargins(14, 16, 14, 14);
-    sv->setSpacing(12);
+    sv->setContentsMargins(18, 20, 16, 16);
+    sv->setSpacing(0);
 
-    // 品牌
-    auto *brandRow = new QHBoxLayout;
-    brandRow->setSpacing(9);
-    auto *mark = new QLabel(QStringLiteral("T"));
-    mark->setObjectName("brandMark");
-    mark->setFixedSize(32, 32);
-    mark->setAlignment(Qt::AlignCenter);
-    auto *brandCol = new QVBoxLayout;
-    brandCol->setSpacing(0);
-    auto *name = new QLabel(QStringLiteral("Tunnel"));
-    name->setObjectName("brandName");
+    auto *wordmark = new QLabel(QStringLiteral("Tunnel"));
+    wordmark->setObjectName("wordmark");
     auto *domain = new QLabel(st_->config().baseDomain);
-    domain->setObjectName("muted");
-    domain->setStyleSheet(QStringLiteral("font-size:10px;"));
-    brandCol->addWidget(name);
-    brandCol->addWidget(domain);
-    brandRow->addWidget(mark);
-    brandRow->addLayout(brandCol);
-    brandRow->addStretch();
-    sv->addLayout(brandRow);
+    domain->setObjectName("faint");
+    sv->addWidget(wordmark);
+    sv->addWidget(domain);
+    sv->addSpacing(20);
 
-    // 状态卡
-    auto *statusCard = new QFrame;
-    statusCard->setObjectName("tile");
-    auto *sc = new QGridLayout(statusCard);
-    sc->setContentsMargins(12, 10, 12, 10);
-    sc->setHorizontalSpacing(8);
-    sc->setVerticalSpacing(2);
+    // 状态（纯文本，无卡片）
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setSpacing(8);
     statusDot_ = new QLabel;
-    statusDot_->setFixedSize(9, 9);
+    statusDot_->setFixedSize(8, 8);
     statusTitle_ = new QLabel(QStringLiteral("未连接"));
-    statusTitle_->setStyleSheet(QStringLiteral("font-weight:650;"));
+    statusTitle_->setObjectName("muted");
+    statusRow->addWidget(statusDot_);
+    statusRow->addWidget(statusTitle_);
+    statusRow->addStretch();
+    sv->addLayout(statusRow);
     statusSub_ = new QLabel("—");
-    statusSub_->setObjectName("muted");
-    statusSub_->setStyleSheet(QStringLiteral("font-size:10px;"));
-    sc->addWidget(statusDot_, 0, 0);
-    sc->addWidget(statusTitle_, 0, 1);
-    sc->addWidget(statusSub_, 1, 0, 1, 2);
-    sv->addWidget(statusCard);
+    statusSub_->setObjectName("faint");
+    sv->addWidget(statusSub_);
+    sv->addSpacing(22);
 
-    sv->addWidget(ui::sectionTitle(QStringLiteral("工作区")));
-
+    sv->addWidget(ui::eyebrow(QStringLiteral("workspace")));
+    sv->addSpacing(8);
     auto *nav = new QListWidget;
     nav->setObjectName("nav");
-    nav->addItems({QStringLiteral("▦   隧道"), QStringLiteral("☰   日志"),
-                   QStringLiteral("◔   流量"), QStringLiteral("⚙   设置")});
+    nav->addItems({QStringLiteral("隧道"), QStringLiteral("日志"),
+                   QStringLiteral("流量"), QStringLiteral("设置")});
     nav->setCurrentRow(0);
-    nav->setFixedHeight(4 * 40 + 10);
+    nav->setFixedHeight(4 * 36 + 6);
     sv->addWidget(nav);
 
-    sv->addWidget(ui::sectionTitle(QStringLiteral("隧道")));
+    sv->addSpacing(22);
+    sv->addWidget(ui::eyebrow(QStringLiteral("tunnels")));
+    sv->addSpacing(6);
     tunnelList_ = new QListWidget;
-    tunnelList_->setObjectName("tunnelList");
+    tunnelList_->setObjectName("rail");
+    tunnelList_->setSelectionMode(QAbstractItemView::NoSelection);
     sv->addWidget(tunnelList_, 1);
 
     root->addWidget(sidebar);
@@ -118,9 +104,8 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
 
 void MainWindow::refreshStatus() {
     const bool connected = st_->client()->isConnected();
-    const bool connecting = st_->client()->config().serverUrl.size() > 0 && !connected;
     statusDot_->setStyleSheet(QStringLiteral("background:%1;border-radius:4px;")
-                                  .arg(connected ? "#3ddc84" : (connecting ? "#f5b74e" : "#55617a")));
+                                  .arg(connected ? "#3ddc84" : "#4a4a4a"));
     statusTitle_->setText(connected ? QStringLiteral("已连接") : QStringLiteral("未连接"));
     statusSub_->setText(connected ? QStringLiteral("运行中 · %1 秒").arg(st_->uptimeSecs())
                                   : st_->config().clientId);
@@ -129,7 +114,20 @@ void MainWindow::refreshStatus() {
     const auto &stats = st_->stats();
     for (const auto &t : st_->config().tunnels) {
         const auto s = stats.value(t.tunnelId);
-        tunnelList_->addItem(QStringLiteral("•  %1        %2").arg(t.tunnelId).arg(s.count));
+        auto *row = new QWidget;
+        auto *h = new QHBoxLayout(row);
+        h->setContentsMargins(2, 1, 2, 1);
+        auto *name = new QLabel(t.tunnelId);
+        name->setObjectName("mono");
+        auto *count = new QLabel(QString::number(s.count));
+        count->setObjectName("faint");
+        h->addWidget(name);
+        h->addStretch();
+        h->addWidget(count);
+        auto *item = new QListWidgetItem;
+        item->setSizeHint(QSize(0, 30));
+        tunnelList_->addItem(item);
+        tunnelList_->setItemWidget(item, row);
     }
 }
 

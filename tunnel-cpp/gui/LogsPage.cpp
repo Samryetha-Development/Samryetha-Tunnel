@@ -32,10 +32,12 @@ static QString escape(const QString &s) {
 
 LogsPage::LogsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(12);
+    root->setContentsMargins(34, 30, 34, 24);
+    root->setSpacing(0);
 
-    root->addWidget(ui::sectionTitle(QStringLiteral("运行日志")));
+    root->addWidget(ui::eyebrow(QStringLiteral("logs")));
+    root->addWidget(ui::pageTitle(QStringLiteral("日志")));
+    root->addSpacing(18);
 
     auto *bar = new QHBoxLayout;
     bar->setSpacing(8);
@@ -63,8 +65,9 @@ LogsPage::LogsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     view_ = new QTextEdit;
     view_->setReadOnly(true);
     view_->setStyleSheet(QStringLiteral("font-family: ui-monospace, Menlo, Consolas, monospace;"
-                                        "font-size: 12px; background:#0d1420; border:1px solid #1f2937;"
-                                        "border-radius:12px; padding:8px;"));
+                                        "font-size: 12px; background:#0d0d0d; border:1px solid #1a1a1a;"
+                                        "border-radius:10px; padding:12px;"));
+    root->addSpacing(14);
     root->addWidget(view_, 1);
 
     connect(st_, &AppState::logsChanged, this, &LogsPage::refresh);
@@ -99,10 +102,10 @@ void LogsPage::refresh() {
             continue;
         const QString color = levelColor(e.level);
         html += QStringLiteral(
-                    "<span style='color:#4a5568'>%1</span> "
-                    "<span style='color:%2;font-weight:700'>[%3]</span> "
-                    "<span style='color:#8aa0b8'>%4</span> "
-                    "<span style='color:#dbe4ef'>%5</span><br>")
+                    "<span style='color:#5c5c5c'>%1</span> "
+                    "<span style='color:%2;font-weight:600'>%3</span> "
+                    "<span style='color:#8f8f8f'>%4</span> "
+                    "<span style='color:#dcdcdc'>%5</span><br>")
                     .arg(e.at.toString(QStringLiteral("HH:mm:ss")), color, e.level,
                          escape(e.source), escape(e.message));
     }

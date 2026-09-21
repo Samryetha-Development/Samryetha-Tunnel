@@ -1,6 +1,7 @@
 #include "SettingsPage.hpp"
 #include "AppState.hpp"
 #include "TunnelEditorDialog.hpp"
+#include "Ui.hpp"
 
 #include "tunnel/Api.hpp"
 #include "tunnel/Config.hpp"
@@ -26,11 +27,15 @@ namespace gui {
 
 SettingsPage::SettingsPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(18, 18, 18, 18);
-    root->setSpacing(12);
+    root->setContentsMargins(34, 30, 34, 24);
+    root->setSpacing(0);
+
+    root->addWidget(ui::eyebrow(QStringLiteral("settings")));
+    root->addWidget(ui::pageTitle(QStringLiteral("设置")));
+    root->addSpacing(6);
 
     // 服务端
-    auto *serverBox = new QGroupBox(QStringLiteral("服务端"));
+    auto *serverBox = new QGroupBox(QStringLiteral("SERVER"));
     auto *form = new QFormLayout(serverBox);
     server_ = new QLineEdit;
     server_->setPlaceholderText(QStringLiteral("wss://frp.example.com/tunnel"));
@@ -57,7 +62,7 @@ SettingsPage::SettingsPage(AppState *st, QWidget *parent) : QWidget(parent), st_
     root->addWidget(serverBox);
 
     // 隧道
-    auto *tunnelBox = new QGroupBox(QStringLiteral("隧道（保存后需重连生效）"));
+    auto *tunnelBox = new QGroupBox(QStringLiteral("TUNNELS（保存后需重连生效）"));
     auto *tv = new QVBoxLayout(tunnelBox);
     tunnelTable_ = new QTableWidget;
     tunnelTable_->setColumnCount(5);

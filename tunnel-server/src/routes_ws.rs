@@ -81,6 +81,12 @@ async fn prepare(
 
         if proto == "tcp" {
             // 纯 IP 中转：端口池只在 relay 角色可用
+            if !matches!(state.cfg.role, crate::config::Role::Relay) {
+                errors.push(format!(
+                    "{tunnel_id}: tcp 隧道只能在 relay（纯 IP 中转）角色注册"
+                ));
+                continue;
+            }
             match state
                 .registry
                 .allocate_port(

@@ -8,7 +8,6 @@
 
 #include <QClipboard>
 #include <QFrame>
-#include <QGridLayout>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -32,61 +31,70 @@ static QString fmtBytes(qint64 b) {
 
 DashboardPage::DashboardPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(20, 20, 20, 20);
-    root->setSpacing(16);
+    root->setContentsMargins(34, 30, 34, 24);
+    root->setSpacing(0);
 
-    // ---------- Hero ----------
-    auto *hero = new QFrame;
-    hero->setObjectName("hero");
-    auto *hv = new QHBoxLayout(hero);
-    hv->setContentsMargins(20, 18, 20, 18);
-    hv->setSpacing(14);
-
-    dot_ = new QLabel;
-    dot_->setFixedSize(12, 12);
-
+    // ---------- 页头 ----------
+    auto *head = new QHBoxLayout;
+    head->setSpacing(16);
     auto *col = new QVBoxLayout;
-    col->setSpacing(4);
-    title_ = new QLabel(QStringLiteral("控制通道未建立"));
-    title_->setObjectName("h1");
-    subtitle_ = new QLabel("—");
-    subtitle_->setObjectName("heroSub");
+    col->setSpacing(6);
+    col->addWidget(ui::eyebrow(QStringLiteral("control channel")));
+    title_ = ui::pageTitle(QStringLiteral("未连接"));
     col->addWidget(title_);
+    subtitle_ = new QLabel("—");
+    subtitle_->setObjectName("mono");
+    subtitle_->setStyleSheet(QStringLiteral("color:#6f6f6f;"));
     col->addWidget(subtitle_);
-    hv->addWidget(dot_);
-    hv->addLayout(col);
-    hv->addStretch();
+    head->addLayout(col);
+    head->addStretch();
 
     auto *testAll = new QPushButton(QStringLiteral("测试本地"));
-    testAll->setObjectName("ghost");
+    testAll->setObjectName("link");
     auto *addBtn = new QPushButton(QStringLiteral("＋ 新隧道"));
-    addBtn->setObjectName("ghost");
+    addBtn->setObjectName("link");
     connectBtn_ = new QPushButton(QStringLiteral("连接"));
     connectBtn_->setObjectName("primary");
-    connectBtn_->setMinimumWidth(96);
-    hv->addWidget(testAll);
-    hv->addWidget(addBtn);
-    hv->addWidget(connectBtn_);
-    root->addWidget(hero);
+    connectBtn_->setMinimumWidth(104);
+    head->addWidget(testAll, 0, Qt::AlignBottom);
+    head->addWidget(addBtn, 0, Qt::AlignBottom);
+    head->addWidget(connectBtn_, 0, Qt::AlignBottom);
+    root->addLayout(head);
 
-    // ---------- 指标 ----------
-    auto *tiles = new QHBoxLayout;
-    tiles->setSpacing(12);
-    tiles->addWidget(ui::statTile(QStringLiteral("隧道数"), theme::kAccent, &vTunnels_));
-    tiles->addWidget(ui::statTile(QStringLiteral("累计请求"), theme::kAccent2, &vReqs_));
-    tiles->addWidget(ui::statTile(QStringLiteral("成功率"), theme::kPurple, &vRate_));
-    tiles->addWidget(ui::statTile(QStringLiteral("下行流量"), theme::kWarn, &vBytes_));
-    root->addLayout(tiles);
+    root->addSpacing(22);
+    root->addWidget(ui::separator());
+    root->addSpacing(22);
 
-    // ---------- 隧道卡片 ----------
-    root->addWidget(ui::sectionTitle(QStringLiteral("我的隧道")));
+    // ---------- 总览 ----------
+    root->addWidget(ui::eyebrow(QStringLiteral("overview")));
+    root->addSpacing(14);
+    auto *metrics = new QHBoxLayout;
+    metrics->setSpacing(60);
+    metrics->addWidget(ui::metric(QStringLiteral("隧道"), &vTunnels_));
+    metrics->addWidget(ui::metric(QStringLiteral("累计请求"), &vReqs_));
+    metrics->addWidget(ui::metric(QStringLiteral("成功率"), &vRate_));
+    metrics->addWidget(ui::metric(QStringLiteral("下行流量"), &vBytes_));
+    metrics->addStretch();
+    root->addLayout(metrics);
+
+    root->addSpacing(26);
+    root->addWidget(ui::separator());
+    root->addSpacing(22);
+
+    // ---------- 隧道列表 ----------
+    auto *tl = new QHBoxLayout;
+    tl->addWidget(ui::eyebrow(QStringLiteral("tunnels")));
+    tl->addStretch();
+    root->addLayout(tl);
+    root->addSpacing(6);
+
     auto *scroll = new QScrollArea;
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     cardsHost_ = new QWidget;
     auto *cv = new QVBoxLayout(cardsHost_);
-    cv->setContentsMargins(0, 0, 6, 0);
-    cv->setSpacing(12);
+    cv->setContentsMargins(0, 0, 0, 0);
+    cv->setSpacing(0);
     scroll->setWidget(cardsHost_);
     root->addWidget(scroll, 1);
 
@@ -123,65 +131,70 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
         urls[e.tunnelId] = e.publicUrl;
     const auto stat = st_->stats().value(t.tunnelId);
 
-    auto *card = new QFrame;
-    card->setObjectName("tunnelCard");
-    auto *v = new QVBoxLayout(card);
-    v->setContentsMargins(16, 14, 16, 14);
-    v->setSpacing(9);
+    auto *row = new QFrame;
+    row->setObjectName("row");
+    row->setAttribute(Qt::WA_Hover, true);
+    auto *h = new QHBoxLayout(row);
+    h->setContentsMargins(0, 16, 0, 16);
+    h->setSpacing(18);
 
-    // 第一行：ID + 类型 + 状态
-    auto *top = new QHBoxLayout;
+    // 左：主信息
+    auto *left = new QVBoxLayout;
+    left->setSpacing(7);
+    auto *titleRow = new QHBoxLayout;
+    titleRow->setSpacing(10);
     auto *id = new QLabel(t.tunnelId);
-    id->setObjectName("h2");
-    top->addWidget(id);
-    top->addWidget(ui::chip(t.proto));
-    auto *pill = ui::pill(connected ? QStringLiteral("● 在线") : QStringLiteral("○ 离线"), connected);
-    top->addWidget(pill);
-    top->addStretch();
-    if (stat.count > 0) {
-        auto *s = ui::chip(QStringLiteral("%1 次 · %2").arg(stat.count).arg(fmtBytes(stat.bytes)));
-        top->addWidget(s);
-    }
-    v->addLayout(top);
+    id->setObjectName("sectionTitle");
+    titleRow->addWidget(id);
+    titleRow->addWidget(ui::chip(t.proto));
+    titleRow->addWidget(ui::pill(connected ? QStringLiteral("在线") : QStringLiteral("离线"), connected));
+    titleRow->addStretch();
+    left->addLayout(titleRow);
 
-    // 路由
-    const QString url = urls.value(t.tunnelId, connected ? QStringLiteral("—") : QStringLiteral("未连接"));
-    auto *route = new QHBoxLayout;
-    auto *routeIcon = new QLabel(QStringLiteral("🌐"));
+    const QString url = urls.value(t.tunnelId, QStringLiteral("—"));
+    auto *routeRow = new QHBoxLayout;
+    routeRow->setSpacing(8);
     auto *routeText = new QLabel(url);
     routeText->setObjectName("mono");
     routeText->setTextInteractionFlags(Qt::TextSelectableByMouse);
     auto *copy = new QPushButton(QStringLiteral("复制"));
-    copy->setObjectName("ghost");
-    copy->setFixedHeight(26);
-    route->addWidget(routeIcon);
-    route->addWidget(routeText, 1);
-    route->addWidget(copy);
-    v->addLayout(route);
+    copy->setObjectName("link");
+    routeRow->addWidget(routeText);
+    routeRow->addWidget(copy);
+    routeRow->addStretch();
+    left->addLayout(routeRow);
 
-    // 本地
-    auto *local = new QHBoxLayout;
-    auto *localIcon = new QLabel(QStringLiteral("🏠"));
     auto *localText = new QLabel(t.localAddr);
-    localText->setObjectName("mono");
-    local->addWidget(localIcon);
-    local->addWidget(localText);
-    local->addStretch();
-    v->addLayout(local);
+    localText->setObjectName("faint");
+    left->addWidget(localText);
+    h->addLayout(left, 1);
 
-    // 操作
+    // 右：统计 + 操作
+    auto *right = new QVBoxLayout;
+    right->setSpacing(10);
+    auto *statText = new QLabel(stat.count > 0
+                                    ? QStringLiteral("%1 次 · %2 · %3ms")
+                                          .arg(stat.count)
+                                          .arg(fmtBytes(stat.bytes))
+                                          .arg(stat.lastMs)
+                                    : QStringLiteral("—"));
+    statText->setObjectName("mono");
+    statText->setAlignment(Qt::AlignRight);
+    right->addWidget(statText);
     auto *acts = new QHBoxLayout;
+    acts->setSpacing(4);
+    acts->addStretch();
     auto *test = new QPushButton(QStringLiteral("本地测试"));
-    test->setObjectName("ghost");
+    test->setObjectName("link");
     auto *edit = new QPushButton(QStringLiteral("编辑"));
-    edit->setObjectName("ghost");
+    edit->setObjectName("link");
     auto *del = new QPushButton(QStringLiteral("删除"));
-    del->setObjectName("danger");
+    del->setObjectName("linkDanger");
     acts->addWidget(test);
     acts->addWidget(edit);
-    acts->addStretch();
     acts->addWidget(del);
-    v->addLayout(acts);
+    right->addLayout(acts);
+    h->addLayout(right);
 
     connect(copy, &QPushButton::clicked, this, [url]() {
         QGuiApplication::clipboard()->setText(url);
@@ -194,14 +207,14 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
             refresh();
         }
     });
-    connect(del, &QPushButton::clicked, this, [this, id = t.tunnelId]() {
+    connect(del, &QPushButton::clicked, this, [this, tid = t.tunnelId]() {
         if (QMessageBox::question(this, QStringLiteral("删除"),
-                                  QStringLiteral("删除隧道 %1？").arg(id)) == QMessageBox::Yes) {
-            st_->removeTunnel(id);
+                                  QStringLiteral("删除隧道 %1？").arg(tid)) == QMessageBox::Yes) {
+            st_->removeTunnel(tid);
             refresh();
         }
     });
-    return card;
+    return row;
 }
 
 void DashboardPage::rebuildCards(bool connected) {
@@ -212,10 +225,9 @@ void DashboardPage::rebuildCards(bool connected) {
         delete item;
     }
     if (st_->config().tunnels.isEmpty()) {
-        auto *empty = new QLabel(QStringLiteral("还没有隧道 —— 点右上「＋ 新隧道」，把内网服务暴露出去。"));
+        auto *empty = new QLabel(QStringLiteral("还没有隧道。点右上「＋ 新隧道」把内网服务暴露出去。"));
         empty->setObjectName("muted");
-        empty->setAlignment(Qt::AlignCenter);
-        empty->setMinimumHeight(120);
+        empty->setContentsMargins(0, 30, 0, 0);
         cv->addWidget(empty);
         cv->addStretch();
         return;
@@ -227,14 +239,14 @@ void DashboardPage::rebuildCards(bool connected) {
 
 void DashboardPage::refresh() {
     const bool connected = st_->client()->isConnected();
-    dot_->setStyleSheet(QStringLiteral("background:%1;border-radius:6px;")
-                            .arg(connected ? theme::kAccent : "#55617a"));
-    title_->setText(connected ? QStringLiteral("控制通道正常") : QStringLiteral("控制通道未建立"));
-    subtitle_->setText(st_->config().serverUrl + QStringLiteral("  ·  ") + st_->config().clientId);
+    title_->setText(connected ? QStringLiteral("控制通道正常") : QStringLiteral("未连接"));
+    subtitle_->setText(st_->config().serverUrl + QStringLiteral("   ·   ") + st_->config().clientId);
     connectBtn_->setText(connected ? QStringLiteral("断开") : QStringLiteral("连接"));
-    connectBtn_->setObjectName(connected ? "danger" : "primary");
-    connectBtn_->style()->unpolish(connectBtn_);
-    connectBtn_->style()->polish(connectBtn_);
+    connectBtn_->setStyleSheet(connected
+                                   ? QStringLiteral("QPushButton{background:transparent;border:1px solid #2a2a2a;"
+                                                    "color:#dcdcdc;border-radius:909px;padding:7px 16px;}"
+                                                    "QPushButton:hover{border-color:#3a3a3a;color:#fff;}")
+                                   : QString());
 
     int total = 0, ok = 0;
     qint64 bytes = 0;

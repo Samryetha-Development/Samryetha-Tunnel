@@ -1,6 +1,7 @@
 #include "net.hpp"
 #include "util.hpp"
 
+#include <cerrno>
 #include <cstring>
 #include <sstream>
 
@@ -132,17 +133,36 @@ long Socket::readSome(void *buf, size_t n) {
         if (r > 0) return r;
         int e = SSL_get_error((SSL *)ssl_, r);
         if (e == SSL_ERROR_ZERO_RETURN) return 0;
+        if (e == SSL_ERROR_WANT_READ || e == SSL_ERROR_WANT_WRITE) return -2; // 超时
         return -1;
     }
 #endif
 #ifdef _WIN32
     int r = ::recv((SOCKET)fd_, (char *)buf, (int)n, 0);
     if (r == 0) return 0;
-    if (r == SOCKET_ERROR) return -1;
+    if (r == SOCKET_ERROR) {
+        const int e = WSAGetLastError();
+        if (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) return -2;
+        return -1;
+    }
     return r;
 #else
     ssize_t r = ::recv((int)fd_, buf, n, 0);
+    if (r < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return -2;
     return (long)r;
+#endif
+}
+
+void Socket::setReadTimeout(int ms) {
+    if (fd_ < 0) return;
+#ifdef _WIN32
+    DWORD tv = (DWORD)ms;
+    setsockopt((SOCKET)fd_, SOL_SOCKET, SO_RCVTIMEO, (const char *)&tv, sizeof(tv));
+#else
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt((int)fd_, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 #endif
 }
 
@@ -214,6 +234,11 @@ bool WebSocket::readExact(void *buf, size_t n) {
     size_t got = 0;
     while (got < n) {
         long r = sock_.readSome(p + got, n - got);
+        if (r == -2) {
+            if (stop_ && *stop_)
+                return false; // 收到退出信号，立即返回
+            continue;         // 读超时，继续等
+        }
         if (r <= 0)
             return false;
         got += (size_t)r;

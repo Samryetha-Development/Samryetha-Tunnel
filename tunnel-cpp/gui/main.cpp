@@ -32,6 +32,7 @@ int main(int argc, char **argv) {
 
     gui::AppState state;
     state.load();
+    qInfo("config file: %s", state.configPath().toUtf8().constData());
 
     gui::MainWindow window(&state);
     window.show();

@@ -140,8 +140,10 @@ int main(int argc, char **argv) {
     });
     QObject::connect(&client, &Client::ack, &app,
                      [](bool ok, const QString &err, const QList<EffectiveTunnel> &list) {
+                         if (!err.isEmpty())
+                             print("warn", "net", QStringLiteral("服务端提示: ") + err);
                          if (!ok)
-                             print("err", "net", QStringLiteral("注册失败: ") + err);
+                             print("err", "net", QStringLiteral("注册失败"));
                          for (const auto &t : list)
                              print("ok", t.tunnelId, QStringLiteral("公网地址 %1").arg(t.publicUrl));
                      });
