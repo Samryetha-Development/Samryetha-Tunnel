@@ -45,6 +45,7 @@ impl User {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[allow(dead_code)]
 pub struct ApiToken {
     pub id: i64,
     #[serde(skip)]

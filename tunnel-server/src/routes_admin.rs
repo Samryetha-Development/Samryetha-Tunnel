@@ -129,7 +129,7 @@ pub async fn patch_user(
     let _ = q.execute(&state.db).await;
 
     if body.disabled == Some(true) {
-        state.registry.remove_client(id).await;
+        state.registry.remove_user_conns(id).await;
     }
     crate::db::audit(
         &state.db,

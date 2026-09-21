@@ -28,7 +28,9 @@ pub async fn tunnel_handler(
     };
     // v=3 走私有二进制协议；缺省为 JSON 兼容模式
     let binary = q.get("v").map(|v| v == "3").unwrap_or(false);
-    ws.on_upgrade(move |socket| handle_socket(socket, state, user, binary))
+    // 每条 WebSocket 连接一个 conn_id：一个客户端可开多条连接（每隧道独立，避免队头阻塞）
+    let conn_id = state.registry.new_conn_id().await;
+    ws.on_upgrade(move |socket| handle_socket(socket, state, user, binary, conn_id))
         .into_response()
 }
 
@@ -56,6 +58,7 @@ async fn prepare(
     state: &AppState,
     user: &User,
     defs: &[crate::models::TunnelDef],
+    conn_id: u64,
 ) -> (Vec<Prepared>, Vec<String>) {
     let mut prepared = Vec::new();
     let mut errors = Vec::new();
@@ -93,7 +96,7 @@ async fn prepare(
             match state
                 .registry
                 .allocate_port(
-                    user.id,
+                    conn_id,
                     &tunnel_id,
                     state.cfg.tcp_port_start,
                     state.cfg.tcp_port_end,
@@ -160,21 +163,9 @@ async fn prepare(
 
 async fn persist(state: &AppState, user: &User, prepared: &[Prepared]) {
     let now = util::now();
-    // 删除本次没上报的旧隧道
-    let keep: Vec<String> = prepared.iter().map(|p| p.input.tunnel_id.clone()).collect();
-    let existing: Vec<TunnelRow> = sqlx::query_as("SELECT * FROM tunnels WHERE user_id = ?")
-        .bind(user.id)
-        .fetch_all(&state.db)
-        .await
-        .unwrap_or_default();
-    for row in existing {
-        if !keep.contains(&row.tunnel_id) {
-            let _ = sqlx::query("DELETE FROM tunnels WHERE id = ?")
-                .bind(row.id)
-                .execute(&state.db)
-                .await;
-        }
-    }
+    // 注意：多连接模式下不再删除「本次未上报」的旧隧道行
+    // （同一用户可能有多条连接，各自只上报自己那部分隧道）。
+    // 需要清理请在 Web 控制台/API 删除，未连接的会显示为离线。
     for p in prepared {
         let public_host = if p.input.proto == "tcp" {
             p.public_url.clone()
@@ -210,7 +201,7 @@ fn encode_out(m: &ServerMsg, binary: bool) -> Message {
     }
 }
 
-pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binary: bool) {
+pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binary: bool, conn_id: u64) {
     let user_id = user.id;
     let (mut ws_tx, mut ws_rx) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<ServerMsg>();
@@ -239,9 +230,10 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binar
     });
 
     info!(
-        "control channel opened: user={} ({}) proto={}",
+        "control channel opened: user={} ({}) conn={} proto={}",
         user.email,
         user_id,
+        conn_id,
         if binary { "binary-v3" } else { "json" }
     );
 
@@ -273,8 +265,8 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binar
                 }
                 let (prepared, errors) = {
                     // 先释放旧 TCP 端口，再重新分配
-                    state.registry.release_ports(user_id).await;
-                    prepare(&state, &user, &tunnels).await
+                    state.registry.release_ports(conn_id).await;
+                    prepare(&state, &user, &tunnels, conn_id).await
                 };
                 persist(&state, &user, &prepared).await;
 
@@ -304,7 +296,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binar
 
                 state
                     .registry
-                    .register_client(user_id, tx.clone(), inputs)
+                    .register_client(conn_id, user_id, tx.clone(), inputs)
                     .await;
                 crate::db::audit(
                     &state.db,
@@ -358,7 +350,7 @@ pub async fn handle_socket(socket: WebSocket, state: AppState, user: User, binar
     }
 
     info!("control channel closed: user={user_id}");
-    state.registry.remove_client(user_id).await;
+    state.registry.remove_client(conn_id).await;
     write_task.abort();
     let _ = write_task.await;
 }

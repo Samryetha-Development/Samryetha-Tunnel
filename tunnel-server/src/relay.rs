@@ -8,44 +8,42 @@ use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-/// 纯 IP 中转：按注册的 TCP 端口开公网监听，把字节经控制通道转发给客户端
+/// 纯 IP 中转：按注册的 TCP 端口开公网监听，把字节经控制通道转发给客户端。
+/// 每个端口绑定到一条 **连接**（conn_id），与其他隧道互不影响。
 pub async fn run(state: AppState) {
-    let listeners: Arc<Mutex<HashMap<(i64, String, u16), JoinHandle<()>>>> =
+    let listeners: Arc<Mutex<HashMap<u16, (u64, i64, String, JoinHandle<()>)>>> =
         Arc::new(Mutex::new(HashMap::new()));
 
     loop {
-        let bindings: HashMap<(i64, String, u16), ()> = state            .registry
-            .tcp_bindings()
-            .await
+        let bindings = state.registry.tcp_bindings().await; // (conn_id, user_id, tunnel_id, port)
+        let want: HashMap<u16, (u64, i64, String)> = bindings
             .into_iter()
-            .map(|(u, t, p)| ((u, t, p), ()))
+            .map(|(cid, uid, tid, port)| (port, (cid, uid, tid)))
             .collect();
 
         let mut guard = listeners.lock().await;
         // 停掉已失效的监听
-        let stale: Vec<_> = guard
+        let stale: Vec<u16> = guard
             .keys()
-            .filter(|k| !bindings.contains_key(k))
+            .filter(|p| !want.contains_key(p))
             .cloned()
             .collect();
-        for k in stale {
-            if let Some(h) = guard.remove(&k) {
+        for p in stale {
+            if let Some((_, _, _, h)) = guard.remove(&p) {
                 h.abort();
-                info!("relay: 关闭端口 {}", k.2);
+                info!("relay: 关闭端口 {p}");
             }
         }
         // 启动新监听
-        for (uid, tid, port) in bindings.keys() {
-            let key = (*uid, tid.clone(), *port);
-            if guard.contains_key(&key) {
+        for (port, (conn_id, user_id, tunnel_id)) in want {
+            if guard.contains_key(&port) {
                 continue;
             }
-            match TcpListener::bind(("0.0.0.0", *port)).await {
+            match TcpListener::bind(("0.0.0.0", port)).await {
                 Ok(listener) => {
-                    info!("relay: 监听 0.0.0.0:{port} -> user {uid} / {tid}");
+                    info!("relay: 监听 0.0.0.0:{port} -> user {user_id} conn {conn_id} / {tunnel_id}");
                     let st = state.clone();
-                    let uid2 = *uid;
-                    let tid2 = tid.clone();
+                    let tid2 = tunnel_id.clone();
                     let handle = tokio::spawn(async move {
                         loop {
                             match listener.accept().await {
@@ -54,7 +52,7 @@ pub async fn run(state: AppState) {
                                     let st2 = st.clone();
                                     let tid3 = tid2.clone();
                                     tokio::spawn(async move {
-                                        handle_conn(st2, uid2, tid3, sock, peer).await;
+                                        handle_conn(st2, conn_id, user_id, tid3, sock, peer).await;
                                     });
                                 }
                                 Err(e) => {
@@ -64,7 +62,7 @@ pub async fn run(state: AppState) {
                             }
                         }
                     });
-                    guard.insert(key, handle);
+                    guard.insert(port, (conn_id, user_id, tunnel_id, handle));
                 }
                 Err(e) => {
                     warn!("relay 绑定端口 {port} 失败: {e}");
@@ -78,6 +76,7 @@ pub async fn run(state: AppState) {
 
 async fn handle_conn(
     state: AppState,
+    conn_id: u64,
     user_id: i64,
     tunnel_id: String,
     stream: tokio::net::TcpStream,
@@ -100,7 +99,7 @@ async fn handle_conn(
         headers: Default::default(),
         body: Vec::new(),
     };
-    if !state.registry.send_to_user(user_id, open).await {
+    if !state.registry.send_to_conn(conn_id, open).await {
         state.registry.take_pending(stream_id).await;
         state.stream_release(user_id).await;
         return;
@@ -134,8 +133,8 @@ async fn handle_conn(
                 state.usage.add(user_id, n as i64, 0).await;
                 state
                     .registry
-                    .send_to_user(
-                        user_id,
+                    .send_to_conn(
+                        conn_id,
                         ServerMsg::Chunk {
                             stream_id,
                             data: buf[..n].to_vec(),
@@ -150,7 +149,7 @@ async fn handle_conn(
     // 访客断开：通知客户端关闭本地连接
     state
         .registry
-        .send_to_user(user_id, ServerMsg::CloseStream { stream_id })
+        .send_to_conn(conn_id, ServerMsg::CloseStream { stream_id })
         .await;
     let _ = writer.await;
     state.registry.take_pending(stream_id).await;

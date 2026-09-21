@@ -116,6 +116,7 @@ static bool parseTunnelSpec(const std::string &spec, TunnelCfg &d) {
         else if (k == "sub" || k == "subdomain") d.sub = v;
         else if (k == "path" || k == "prefix" || k == "path_prefix") d.path = v;
         else if (k == "local" || k == "local_addr") d.local = v;
+        else if (k == "conn") d.conn = v;
     }
     return !d.id.empty() && !d.local.empty();
 }
@@ -545,11 +546,14 @@ static void usage() {
         "用法:\n"
         "  tunnel-lite --server <ws://|wss://.../tunnel> [--token T | --dev-token EMAIL]\n"
         "              [--client-id ID] [--config file.json] [--no-reconnect]\n"
-        "              [--proto json|binary]\n"
-        "              --tunnel id=ID,proto=http|tcp,sub=..,path=..,local=host:port（可重复）\n\n"
+        "              [--proto json|binary] [--isolate]\n"
+        "              --tunnel id=ID,proto=http|tcp,sub=..,path=..,local=host:port[,conn=名]（可重复）\n\n"
         "协议:\n"
         "  json    JSON + base64（兼容，默认）\n"
         "  binary  私有二进制帧 v3（更少字节、更低延迟）\n\n"
+        "连接:\n"
+        "  默认所有隧道共用一条连接；--isolate 每条隧道各一条；\n"
+        "  或用 conn=名 把若干隧道分到同一条连接（互不影响，避免队头阻塞）\n\n"
         "示例:\n"
         "  tunnel-lite --server ws://127.0.0.1:18090/tunnel --dev-token a@b.com \\\n"
         "              --tunnel id=web,path=/web,local=127.0.0.1:8080 --proto binary\n";
@@ -559,6 +563,7 @@ int main(int argc, char **argv) {
     std::string server, token, devToken, clientId = "lite", configPath;
     std::vector<TunnelCfg> tunnels;
     bool noReconnect = false;
+    bool isolate = false;
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -578,6 +583,7 @@ int main(int argc, char **argv) {
         else if (a == "--client-id") next(clientId);
         else if (a == "-c" || a == "--config") next(configPath);
         else if (a == "--no-reconnect") noReconnect = true;
+        else if (a == "--isolate") isolate = true;
         else if (a == "--proto") {
             std::string p;
             next(p);
@@ -665,21 +671,55 @@ int main(int argc, char **argv) {
         poolSize = std::max(1, std::atoi(p));
     g_pool.start(poolSize);
 
-    uint64_t tx = 0, rx = 0;
-    int backoff = 1;
-    while (!g_stop) {
-        if (runOnce(server, token, clientId, tunnels, tx, rx))
-            backoff = 1;
-        if (g_stop || noReconnect)
-            break;
-        log("warn", "net", std::to_string(backoff) + " 秒后重连…");
-        for (int i = 0; i < backoff * 10 && !g_stop; ++i)
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        backoff = std::min(backoff * 2, 30);
+    // 隧道分组：conn= 显式指定；--isolate 则每条隧道各一条独立连接
+    std::vector<std::pair<std::string, std::vector<TunnelCfg>>> groups;
+    {
+        std::map<std::string, size_t> idx;
+        for (const auto &t : tunnels) {
+            std::string key = !t.conn.empty() ? ("c:" + t.conn)
+                                              : (isolate ? ("t:" + t.id) : std::string("default"));
+            auto it = idx.find(key);
+            if (it == idx.end()) {
+                idx[key] = groups.size();
+                groups.push_back({key, {}});
+            }
+            groups[idx[key]].second.push_back(t);
+        }
     }
+    if (groups.size() > 1)
+        log("info", "cli",
+            "使用 " + std::to_string(groups.size()) + " 条独立连接（避免跨隧道队头阻塞）");
+
+    std::atomic<uint64_t> totalTx{0}, totalRx{0};
+    std::vector<std::thread> workers;
+    for (auto &g : groups) {
+        workers.emplace_back([&, grp = g]() {
+            const std::string cid =
+                groups.size() > 1 ? (clientId + "@" + grp.first) : clientId;
+            uint64_t tx = 0, rx = 0;
+            int backoff = 1;
+            while (!g_stop) {
+                if (runOnce(server, token, cid, grp.second, tx, rx))
+                    backoff = 1;
+                if (g_stop || noReconnect)
+                    break;
+                log("warn", "net", std::to_string(backoff) + " 秒后重连…");
+                for (int i = 0; i < backoff * 10 && !g_stop; ++i)
+                    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                backoff = std::min(backoff * 2, 30);
+            }
+            totalTx += tx;
+            totalRx += rx;
+        });
+    }
+    for (auto &w : workers)
+        w.join();
+
     log("info", "cli",
-        std::string("已退出（协议 ") + (g_mode == Mode::Binary ? "binary-v3" : "json") +
-            "，累计发送 " + fmtBytes((long long)tx) + " / 接收 " + fmtBytes((long long)rx) + "）");
+        std::string("已退出（协议 ") + (g_mode == Mode::Binary ? "binary-v3" : "json") + "，" +
+            std::to_string(groups.size()) + " 条连接，累计发送 " +
+            fmtBytes((long long)totalTx.load()) + " / 接收 " + fmtBytes((long long)totalRx.load()) +
+            "）");
     g_pool.stop();
     return 0;
 }

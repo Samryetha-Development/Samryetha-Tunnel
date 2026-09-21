@@ -16,6 +16,8 @@ enum class Mode { Json, Binary };
 
 struct TunnelCfg {
     std::string id, proto, sub, path, local;
+    /// 连接分组名：同一 conn 的隧道共用一条 WebSocket（留空表示默认组）
+    std::string conn;
 };
 
 struct EffectiveT {

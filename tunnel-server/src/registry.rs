@@ -4,14 +4,15 @@ use tokio::sync::{mpsc, RwLock};
 
 use crate::protocol::{ServerMsg, StreamEvent};
 
+/// 路由目标：指向某条 **连接** 上的某条隧道
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct RouteTarget {
+    pub conn_id: u64,
     pub user_id: i64,
     pub slug: String,
     pub tunnel_id: String,
     pub proto: String,
-    /// 子路由需要 strip 的前缀
     pub strip_prefix: Option<String>,
     pub visitor_auth: Option<String>,
 }
@@ -26,11 +27,16 @@ pub enum RouteKey {
 struct Inner {
     by_subdomain: HashMap<String, RouteTarget>,
     by_path: Vec<(String, RouteTarget)>,
-    clients: HashMap<i64, mpsc::UnboundedSender<ServerMsg>>,
+    /// conn_id -> 发送端
+    clients: HashMap<u64, mpsc::UnboundedSender<ServerMsg>>,
+    /// conn_id -> user_id
+    conn_user: HashMap<u64, i64>,
     pending: HashMap<u64, mpsc::UnboundedSender<StreamEvent>>,
     next_stream_id: u64,
-    owned: HashMap<i64, Vec<RouteKey>>,
-    tcp_ports: HashMap<(i64, String), u16>,
+    next_conn_id: u64,
+    owned: HashMap<u64, Vec<RouteKey>>,
+    /// (conn_id, tunnel_id) -> 公网端口
+    tcp_ports: HashMap<(u64, String), u16>,
     used_ports: HashSet<u16>,
 }
 
@@ -44,9 +50,7 @@ pub struct RouteInput {
     pub slug: String,
     pub tunnel_id: String,
     pub proto: String,
-    /// 子域名路由的 effective host（不含 base domain），None 表示不走子域名
     pub effective_sub: Option<String>,
-    /// 子路由的 effective prefix（已含用户名命名空间）
     pub effective_path: Option<String>,
     pub visitor_auth: Option<String>,
 }
@@ -56,6 +60,13 @@ impl Registry {
         Self {
             inner: Arc::new(RwLock::new(Inner::default())),
         }
+    }
+
+    /// 分配一个新的连接 ID（一个客户端可开多条连接）
+    pub async fn new_conn_id(&self) -> u64 {
+        let mut g = self.inner.write().await;
+        g.next_conn_id += 1;
+        g.next_conn_id
     }
 
     pub fn normalize_prefix(p: &str) -> String {
@@ -71,13 +82,14 @@ impl Registry {
 
     pub async fn register_client(
         &self,
+        conn_id: u64,
         user_id: i64,
         sender: mpsc::UnboundedSender<ServerMsg>,
         inputs: Vec<RouteInput>,
     ) -> Vec<RouteKey> {
         let mut g = self.inner.write().await;
-        // 清旧路由（TCP 端口由调用方在 prepare 前通过 release_ports 释放）
-        if let Some(keys) = g.owned.remove(&user_id) {
+        // 清旧路由
+        if let Some(keys) = g.owned.remove(&conn_id) {
             for k in keys {
                 match k {
                     RouteKey::Sub(s) => {
@@ -89,17 +101,21 @@ impl Registry {
                 }
             }
         }
-
-        g.clients.insert(user_id, sender);
+        g.clients.insert(conn_id, sender);
+        g.conn_user.insert(conn_id, user_id);
 
         let mut keys = Vec::new();
         for input in inputs {
             let target = RouteTarget {
+                conn_id,
                 user_id: input.user_id,
                 slug: input.slug.clone(),
                 tunnel_id: input.tunnel_id.clone(),
                 proto: input.proto.clone(),
-                strip_prefix: input.effective_path.as_ref().map(|p| Self::normalize_prefix(p)),
+                strip_prefix: input
+                    .effective_path
+                    .as_ref()
+                    .map(|p| Self::normalize_prefix(p)),
                 visitor_auth: input.visitor_auth,
             };
             if let Some(sub) = input.effective_sub {
@@ -115,13 +131,13 @@ impl Registry {
             }
         }
         g.by_path.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
-        g.owned.insert(user_id, keys.clone());
+        g.owned.insert(conn_id, keys.clone());
         keys
     }
 
-    pub async fn remove_client(&self, user_id: i64) {
+    pub async fn remove_client(&self, conn_id: u64) {
         let mut g = self.inner.write().await;
-        if let Some(keys) = g.owned.remove(&user_id) {
+        if let Some(keys) = g.owned.remove(&conn_id) {
             for k in keys {
                 match k {
                     RouteKey::Sub(s) => {
@@ -133,31 +149,52 @@ impl Registry {
                 }
             }
         }
-        let old_ports: Vec<(i64, String)> = g
+        let ports: Vec<(u64, String)> = g
             .tcp_ports
             .keys()
-            .filter(|(uid, _)| *uid == user_id)
+            .filter(|(cid, _)| *cid == conn_id)
             .cloned()
             .collect();
-        for k in old_ports {
+        for k in ports {
             if let Some(p) = g.tcp_ports.remove(&k) {
                 g.used_ports.remove(&p);
             }
         }
-        g.clients.remove(&user_id);
+        g.clients.remove(&conn_id);
+        g.conn_user.remove(&conn_id);
     }
 
-    /// 分配一个 TCP 公网端口（relay 用）
-    pub async fn allocate_port(&self, user_id: i64, tunnel_id: &str, start: u16, end: u16) -> Option<u16> {
+    pub async fn allocate_port(
+        &self,
+        conn_id: u64,
+        tunnel_id: &str,
+        start: u16,
+        end: u16,
+    ) -> Option<u16> {
         let mut g = self.inner.write().await;
         for p in start..=end {
             if !g.used_ports.contains(&p) {
                 g.used_ports.insert(p);
-                g.tcp_ports.insert((user_id, tunnel_id.to_string()), p);
+                g.tcp_ports.insert((conn_id, tunnel_id.to_string()), p);
                 return Some(p);
             }
         }
         None
+    }
+
+    pub async fn release_ports(&self, conn_id: u64) {
+        let mut g = self.inner.write().await;
+        let keys: Vec<(u64, String)> = g
+            .tcp_ports
+            .keys()
+            .filter(|(cid, _)| *cid == conn_id)
+            .cloned()
+            .collect();
+        for k in keys {
+            if let Some(p) = g.tcp_ports.remove(&k) {
+                g.used_ports.remove(&p);
+            }
+        }
     }
 
     pub async fn lookup(&self, host: &str, path: &str, base_domain: &str) -> Option<(RouteTarget, String)> {
@@ -187,9 +224,13 @@ impl Registry {
         None
     }
 
-    pub async fn send_to_user(&self, user_id: i64, msg: ServerMsg) -> bool {
+    /// 向指定连接发送消息
+    pub async fn send_to_conn(&self, conn_id: u64, msg: ServerMsg) -> bool {
         let g = self.inner.read().await;
-        g.clients.get(&user_id).map(|s| s.send(msg).is_ok()).unwrap_or(false)
+        g.clients
+            .get(&conn_id)
+            .map(|s| s.send(msg).is_ok())
+            .unwrap_or(false)
     }
 
     pub async fn next_stream_id(&self) -> u64 {
@@ -211,34 +252,39 @@ impl Registry {
         g.pending.get(&id).map(|tx| tx.send(ev).is_ok()).unwrap_or(false)
     }
 
-    pub async fn online_users(&self) -> Vec<i64> {
-        self.inner.read().await.clients.keys().cloned().collect()
-    }
-
-    /// relay 用：当前所有 TCP 端口绑定 (user_id, tunnel_id, port)
-    pub async fn tcp_bindings(&self) -> Vec<(i64, String, u16)> {
-        self.inner
-            .read()
-            .await
-            .tcp_ports
-            .iter()
-            .map(|((uid, tid), port)| (*uid, tid.clone(), *port))
-            .collect()
-    }
-
-    /// 重新注册前释放该用户占用的 TCP 端口
-    pub async fn release_ports(&self, user_id: i64) {
-        let mut g = self.inner.write().await;
-        let keys: Vec<(i64, String)> = g
-            .tcp_ports
-            .keys()
-            .filter(|(uid, _)| *uid == user_id)
-            .cloned()
-            .collect();
-        for k in keys {
-            if let Some(p) = g.tcp_ports.remove(&k) {
-                g.used_ports.remove(&p);
-            }
+    /// 断开某用户的全部连接（管理员停用用户时用）
+    pub async fn remove_user_conns(&self, user_id: i64) {
+        let conns: Vec<u64> = {
+            let g = self.inner.read().await;
+            g.conn_user
+                .iter()
+                .filter(|(_, uid)| **uid == user_id)
+                .map(|(cid, _)| *cid)
+                .collect()
+        };
+        for cid in conns {
+            self.remove_client(cid).await;
         }
+    }
+
+    /// 去重后的在线用户
+    pub async fn online_users(&self) -> Vec<i64> {
+        let g = self.inner.read().await;
+        let mut v: Vec<i64> = g.conn_user.values().cloned().collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// relay 用：当前所有 TCP 端口绑定 (conn_id, user_id, tunnel_id, port)
+    pub async fn tcp_bindings(&self) -> Vec<(u64, i64, String, u16)> {
+        let g = self.inner.read().await;
+        g.tcp_ports
+            .iter()
+            .map(|((cid, tid), port)| {
+                let user = g.conn_user.get(cid).cloned().unwrap_or(0);
+                (*cid, user, tid.clone(), *port)
+            })
+            .collect()
     }
 }

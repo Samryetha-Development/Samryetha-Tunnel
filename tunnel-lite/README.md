@@ -55,6 +55,23 @@ tunnel-lite --server ws://47.103.21.5:18091/tunnel --token tun_xxx \
 
 隧道参数：`id=ID,proto=http|tcp,sub=子域名,path=/子路由,local=host:port`（`--tunnel` 可重复）。
 
+### 连接与隔离
+
+默认所有隧道共用一条 WebSocket。若某条隧道有大流量（下载/流媒体/长连接），它会和别的隧道**排队在同一条 TCP 上**（队头阻塞），拖高其他隧道的延迟。两种拆法：
+
+```bash
+# 每条隧道各一条独立连接
+tunnel-lite ... --isolate --tunnel id=web,... --tunnel id=ssh,proto=tcp,...
+
+# 或按名字分组：相同 conn 的隧道共用一条连接
+tunnel-lite ... \
+  --tunnel id=web,path=/web,local=127.0.0.1:8080,conn=main \
+  --tunnel id=api,path=/api,local=127.0.0.1:3000,conn=main \
+  --tunnel id=big,path=/files,local=127.0.0.1:9000,conn=files
+```
+
+实测（无限流占满 bulk 隧道，同时探测 fast 隧道）：独立连接把 fast 的 **p99 从 1.175ms 降到 0.441ms（−62%）**，抖动明显压平。详见 [`bench/README.md`](../bench/README.md)。
+
 ### 协议选择
 
 | `--proto` | 传输内容 | 说明 |

@@ -174,7 +174,7 @@ pub async fn visitor_handler(
         headers: filter_headers(&headers),
         body: body_bytes.to_vec(),
     };
-    if !state.registry.send_to_user(target.user_id, open).await {
+    if !state.registry.send_to_conn(target.conn_id, open).await {
         state.registry.take_pending(stream_id).await;
         state.stream_release(target.user_id).await;
         return (StatusCode::BAD_GATEWAY, "client offline").into_response();
