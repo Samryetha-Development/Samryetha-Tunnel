@@ -1,9 +1,17 @@
-# 本地 127.0.0.1:18080，被 Caddy 反代
+# Caddy 反代配置示例
+# 关键：flush_interval -1 —— 关闭响应缓冲，SSE / 长轮询 / 实时推送才不会被憋住
+# （不加这行，扫码登录、通知流这类场景会"转圈"或延迟数秒）
+
+# 主域名：Web 控制台 + 子路由分发
 frp.xxx.com {
-    reverse_proxy 127.0.0.1:18080
+	reverse_proxy 127.0.0.1:18080 {
+		flush_interval -1
+	}
 }
 
-# 泛域名：所有子域名都打到 Rust，由 Rust 按 subdomain 查路由表
+# 泛域名：子域名分发（*.frp.xxx.com -> 各自隧道）
 *.frp.xxx.com {
-    reverse_proxy 127.0.0.1:18080
+	reverse_proxy 127.0.0.1:18080 {
+		flush_interval -1
+	}
 }

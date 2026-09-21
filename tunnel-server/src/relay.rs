@@ -50,6 +50,7 @@ pub async fn run(state: AppState) {
                         loop {
                             match listener.accept().await {
                                 Ok((sock, peer)) => {
+                                    let _ = sock.set_nodelay(true);
                                     let st2 = st.clone();
                                     let tid3 = tid2.clone();
                                     tokio::spawn(async move {
