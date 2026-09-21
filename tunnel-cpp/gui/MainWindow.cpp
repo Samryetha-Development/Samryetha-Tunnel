@@ -2,7 +2,10 @@
 #include "AppState.hpp"
 #include "DashboardPage.hpp"
 #include "LogsPage.hpp"
+#include "AdminPage.hpp"
 #include "SettingsPage.hpp"
+#include "TokensPage.hpp"
+#include "UsagePage.hpp"
 #include "StatsPage.hpp"
 #include "Ui.hpp"
 
@@ -63,10 +66,13 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
     sv->addSpacing(8);
     auto *nav = new QListWidget;
     nav->setObjectName("nav");
-    nav->addItems({QStringLiteral("隧道"), QStringLiteral("日志"),
-                   QStringLiteral("流量"), QStringLiteral("设置")});
+    nav->addItems({QStringLiteral("隧道"), QStringLiteral("Token"),
+                   QStringLiteral("用量"), QStringLiteral("日志"),
+                   QStringLiteral("流量"), QStringLiteral("管理"),
+                   QStringLiteral("设置")});
     nav->setCurrentRow(0);
-    nav->setFixedHeight(4 * 36 + 6);
+    nav->setFixedHeight(7 * 36 + 6);
+    adminItem_ = nav->item(5);
     sv->addWidget(nav);
 
     sv->addSpacing(22);
@@ -82,8 +88,11 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
     // ---------- 页面 ----------
     stack_ = new QStackedWidget;
     stack_->addWidget(new DashboardPage(st_, this));
+    stack_->addWidget(new TokensPage(st_, this));
+    stack_->addWidget(new UsagePage(st_, this));
     stack_->addWidget(new LogsPage(st_, this));
     stack_->addWidget(new StatsPage(st_, this));
+    stack_->addWidget(new AdminPage(st_, this));
     stack_->addWidget(new SettingsPage(st_, this));
     root->addWidget(stack_, 1);
 
@@ -93,6 +102,7 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
     connect(st_, &AppState::stateChanged, this, &MainWindow::refreshStatus);
     connect(st_, &AppState::tunnelsChanged, this, &MainWindow::refreshStatus);
     connect(st_, &AppState::statsChanged, this, &MainWindow::refreshStatus);
+    connect(st_, &AppState::meChanged, this, &MainWindow::updateAdminVisibility);
 
     tick_ = new QTimer(this);
     tick_->setInterval(1000);
@@ -100,6 +110,16 @@ MainWindow::MainWindow(AppState *st, QWidget *parent) : QMainWindow(parent), st_
     tick_->start();
 
     refreshStatus();
+    updateAdminVisibility();
+}
+
+void MainWindow::updateAdminVisibility() {
+    if (!adminItem_)
+        return;
+    const bool admin = st_->isAdmin();
+    adminItem_->setHidden(!admin);
+    if (!admin)
+        stack_->setCurrentIndex(0);
 }
 
 void MainWindow::refreshStatus() {

@@ -3,12 +3,16 @@
 #include "Theme.hpp"
 #include "TunnelEditorDialog.hpp"
 #include "Ui.hpp"
+#include "VisitorAuthDialog.hpp"
 
 #include "tunnel/Client.hpp"
 
 #include <QClipboard>
 #include <QFrame>
 #include <QGuiApplication>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMessageBox>
@@ -188,10 +192,13 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
     test->setObjectName("link");
     auto *edit = new QPushButton(QStringLiteral("编辑"));
     edit->setObjectName("link");
+    auto *visitor = new QPushButton(QStringLiteral("访客鉴权"));
+    visitor->setObjectName("link");
     auto *del = new QPushButton(QStringLiteral("删除"));
     del->setObjectName("linkDanger");
     acts->addWidget(test);
     acts->addWidget(edit);
+    acts->addWidget(visitor);
     acts->addWidget(del);
     right->addLayout(acts);
     h->addLayout(right);
@@ -206,6 +213,41 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
             st_->updateTunnel(t.tunnelId, dlg.result());
             refresh();
         }
+    });
+    connect(visitor, &QPushButton::clicked, this, [this, tid = t.tunnelId]() {
+        st_->api()->request(st_->config().effectiveApiBase(), st_->config().apiToken, "GET",
+                            "/api/tunnels", {},
+                            [this, tid](bool ok, const QJsonObject &o, const QString &e) {
+                                if (!ok) {
+                                    QMessageBox::warning(this, QStringLiteral("失败"), e);
+                                    return;
+                                }
+                                QJsonObject cur;
+                                for (const auto &v : o.value("tunnels").toArray()) {
+                                    const auto t2 = v.toObject();
+                                    if (t2.value("tunnel_id").toString() != tid)
+                                        continue;
+                                    const QString va = t2.value("visitor_auth").toString();
+                                    if (!va.isEmpty())
+                                        cur = QJsonDocument::fromJson(va.toUtf8()).object();
+                                    break;
+                                }
+                                VisitorAuthDialog dlg(tid, cur, this);
+                                if (dlg.exec() != QDialog::Accepted)
+                                    return;
+                                QJsonObject body;
+                                body["visitor_auth"] = dlg.result();
+                                st_->api()->request(st_->config().effectiveApiBase(),
+                                                    st_->config().apiToken, "PATCH",
+                                                    QStringLiteral("/api/tunnels/%1").arg(tid), body,
+                                                    [this](bool ok2, const QJsonObject &, const QString &e2) {
+                                                        if (!ok2)
+                                                            QMessageBox::warning(this, QStringLiteral("失败"), e2);
+                                                        else
+                                                            QMessageBox::information(this, QStringLiteral("已保存"),
+                                                                                     QStringLiteral("重连客户端后生效"));
+                                                    });
+                            });
     });
     connect(del, &QPushButton::clicked, this, [this, tid = t.tunnelId]() {
         if (QMessageBox::question(this, QStringLiteral("删除"),

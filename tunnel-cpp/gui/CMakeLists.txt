@@ -13,6 +13,14 @@ add_executable(tunnel-gui
     StatsPage.cpp
     SettingsPage.hpp
     SettingsPage.cpp
+    TokensPage.hpp
+    TokensPage.cpp
+    UsagePage.hpp
+    UsagePage.cpp
+    AdminPage.hpp
+    AdminPage.cpp
+    VisitorAuthDialog.hpp
+    VisitorAuthDialog.cpp
     TunnelEditorDialog.hpp
     TunnelEditorDialog.cpp
 )

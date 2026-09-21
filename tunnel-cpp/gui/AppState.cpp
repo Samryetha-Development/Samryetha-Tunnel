@@ -13,6 +13,10 @@ namespace gui {
 
 AppState::AppState(QObject *parent) : QObject(parent) {
     client_ = new Client(this);
+    api_ = new Api(this);
+    connect(api_, &Api::failed, this, [this](const QString &e) {
+        addLog(QStringLiteral("warn"), QStringLiteral("api"), e);
+    });
     connect(client_, &Client::log, this, [this](const QString &l, const QString &s, const QString &m) {
         logs_.append(LogEntry{QDateTime::currentDateTime(), l, s, m});
         if (logs_.size() > 2000)
@@ -53,8 +57,7 @@ AppState::AppState(QObject *parent) : QObject(parent) {
             });
 }
 
-QString AppState::configPath() const {
-    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+QString AppState::configPath() const {    const QString dir = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
     QDir().mkpath(dir);
     return dir + "/client.json";
 }
@@ -64,12 +67,38 @@ void AppState::load() {
     client_->setConfig(cfg_);
     emit tunnelsChanged();
     emit stateChanged();
+    refreshMe();
+}
+
+void AppState::addLog(const QString &level, const QString &source, const QString &message) {
+    logs_.append(LogEntry{QDateTime::currentDateTime(), level, source, message});
+    if (logs_.size() > 2000)
+        logs_.remove(0, logs_.size() - 2000);
+    emit logsChanged();
+}
+
+void AppState::refreshMe() {
+    if (cfg_.apiToken.isEmpty())
+        return;
+    api_->request(cfg_.effectiveApiBase(), cfg_.apiToken, QStringLiteral("GET"),
+                  QStringLiteral("/auth/me"), {},
+                  [this](bool ok, const QJsonObject &o, const QString &e) {
+                      if (!ok) {
+                          addLog(QStringLiteral("warn"), QStringLiteral("api"),
+                                 QStringLiteral("获取用户信息失败: ") + e);
+                          return;
+                      }
+                      role_ = o.value("role").toString();
+                      email_ = o.value("email").toString();
+                      emit meChanged();
+                  });
 }
 
 void AppState::save() {
     client_->setConfig(cfg_);
     cfg_.save(configPath());
     emit tunnelsChanged();
+    refreshMe();
 }
 
 void AppState::setApiToken(const QString &token) {

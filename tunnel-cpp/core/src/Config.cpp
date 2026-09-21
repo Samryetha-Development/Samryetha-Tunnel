@@ -34,6 +34,12 @@ QMap<QString, QString> ClientConfig::localMap() const {
     return m;
 }
 
+QString ClientConfig::effectiveApiBase() const {
+    if (!apiBase.trimmed().isEmpty())
+        return apiBase.trimmed();
+    return httpBaseFromWs(serverUrl);
+}
+
 ClientConfig ClientConfig::load(const QString &path) {
     ClientConfig c;
     QFile f(path);
@@ -51,6 +57,8 @@ ClientConfig ClientConfig::load(const QString &path) {
         c.clientId = o.value("client_id").toString();
     if (o.contains("base_domain"))
         c.baseDomain = o.value("base_domain").toString();
+    if (o.contains("api_base"))
+        c.apiBase = o.value("api_base").toString();
     if (o.contains("auto_reconnect"))
         c.autoReconnect = o.value("auto_reconnect").toBool();
     if (o.contains("tunnels")) {
@@ -87,6 +95,7 @@ bool ClientConfig::save(const QString &path) const {
     o["api_token"] = apiToken;
     o["client_id"] = clientId;
     o["base_domain"] = baseDomain;
+    o["api_base"] = apiBase;
     o["auto_reconnect"] = autoReconnect;
     o["tunnels"] = arr;
     QFile f(path);

@@ -11,21 +11,24 @@ class QNetworkRequest;
 
 namespace tunnel {
 
-/// 认证与 REST API：设备码登录（SSO）、dev 登录、隧道/令牌管理
+/// 认证与 REST 管理 API（Token / 隧道 / 访客鉴权 / 用量 / 管理员）
 class Api : public QObject {
     Q_OBJECT
 public:
+    /// 回调：ok=是否成功，obj=响应 JSON，error=错误信息
+    using Callback = std::function<void(bool, const QJsonObject &, const QString &)>;
+
     explicit Api(QObject *parent = nullptr);
 
-    /// GET /auth/config
+    /// 通用请求（method: GET/POST/PATCH/DELETE）
+    void request(const QString &base, const QString &token, const QString &method,
+                 const QString &path, const QJsonObject &body, Callback cb);
+
+    // ---- 兼容旧接口 ----
     void getConfig(const QString &httpBase);
-    /// POST /auth/device/start
     void deviceStart(const QString &httpBase);
-    /// POST /auth/device/poll
     void devicePoll(const QString &httpBase, const QString &deviceCode);
-    /// POST /auth/dev-token（AUTH_MODE=dev 时可用，方便本地联调）
     void devToken(const QString &httpBase, const QString &email);
-    /// GET /api/tunnels
     void listTunnels(const QString &httpBase, const QString &token);
 
 signals:
@@ -37,10 +40,6 @@ signals:
     void failed(const QString &error);
 
 private:
-    QNetworkRequest makeRequest(const QString &url, const QString &token = QString());
-    void postJson(const QString &url, const QJsonObject &body, const QString &token,
-                  std::function<void(const QJsonObject &)> ok,
-                  std::function<void(const QString &)> err);
     QNetworkAccessManager *nam_;
 };
 

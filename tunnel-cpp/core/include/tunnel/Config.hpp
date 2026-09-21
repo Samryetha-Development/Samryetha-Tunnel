@@ -13,6 +13,8 @@ struct ClientConfig {
     QString apiToken;
     QString clientId = QStringLiteral("client");
     QString baseDomain = QStringLiteral("frp.example.com");
+    /// 管理 API 基址；留空则从 serverUrl 推导（ws->http，去掉 /tunnel）
+    QString apiBase;
     bool autoReconnect = true;
     QList<TunnelDef> tunnels;
 
@@ -21,6 +23,8 @@ struct ClientConfig {
 
     /// 从 ws://host:port/tunnel 推导 http(s)://host:port
     static QString httpBaseFromWs(const QString &wsUrl);
+    /// 实际使用的管理 API 基址
+    QString effectiveApiBase() const;
 
     QMap<QString, QString> localMap() const;
 };

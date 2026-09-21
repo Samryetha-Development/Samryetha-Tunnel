@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tunnel/Api.hpp"
 #include "tunnel/Client.hpp"
 #include "tunnel/Config.hpp"
 
@@ -40,10 +41,20 @@ public:
     explicit AppState(QObject *parent = nullptr);
 
     tunnel::Client *client() { return client_; }
+    tunnel::Api *api() { return api_; }
     tunnel::ClientConfig &config() { return cfg_; }
     const QString &lastError() const { return lastError_; }
     QString statusText() const;
     qint64 uptimeSecs() const;
+
+    /// 当前登录用户信息（来自 /auth/me）
+    const QString &role() const { return role_; }
+    const QString &email() const { return email_; }
+    bool isAdmin() const { return role_ == QStringLiteral("admin"); }
+    /// 拉取 /auth/me，成功后发射 meChanged()
+    void refreshMe();
+    /// 追加一条 GUI 日志
+    void addLog(const QString &level, const QString &source, const QString &message);
 
     const QVector<LogEntry> &logs() const { return logs_; }
     const QVector<RequestEvent> &events() const { return events_; }
@@ -70,9 +81,13 @@ signals:
     void statsChanged();
     void stateChanged();
     void tunnelsChanged();
+    void meChanged();
 
 private:
     tunnel::Client *client_;
+    tunnel::Api *api_;
+    QString role_;
+    QString email_;
     tunnel::ClientConfig cfg_;
     QVector<LogEntry> logs_;
     QVector<RequestEvent> events_;

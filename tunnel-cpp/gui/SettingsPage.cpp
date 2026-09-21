@@ -45,11 +45,14 @@ SettingsPage::SettingsPage(AppState *st, QWidget *parent) : QWidget(parent), st_
     clientId_ = new QLineEdit;
     base_ = new QLineEdit;
     base_->setPlaceholderText(QStringLiteral("frp.example.com"));
+    apiBase_ = new QLineEdit;
+    apiBase_->setPlaceholderText(QStringLiteral("留空=自动推导；或 http://127.0.0.1:18080（SSH 转发）"));
     autoReconnect_ = new QCheckBox(QStringLiteral("断线自动重连（指数退避）"));
     form->addRow(QStringLiteral("控制通道地址"), server_);
     form->addRow(QStringLiteral("API Token"), token_);
     form->addRow(QStringLiteral("客户端 ID"), clientId_);
     form->addRow(QStringLiteral("主域名"), base_);
+    form->addRow(QStringLiteral("管理 API 基址"), apiBase_);
     form->addRow(QString(), autoReconnect_);
 
     auto *authRow = new QHBoxLayout;
@@ -166,6 +169,7 @@ void SettingsPage::applyToConfig() {
     c.apiToken = token_->text().trimmed();
     c.clientId = clientId_->text().trimmed();
     c.baseDomain = base_->text().trimmed();
+    c.apiBase = apiBase_->text().trimmed();
     c.autoReconnect = autoReconnect_->isChecked();
 }
 
@@ -179,6 +183,8 @@ void SettingsPage::refresh() {
         clientId_->setText(c.clientId);
     if (!base_->hasFocus())
         base_->setText(c.baseDomain);
+    if (!apiBase_->hasFocus())
+        apiBase_->setText(c.apiBase);
     autoReconnect_->setChecked(c.autoReconnect);
 
     tunnelTable_->setRowCount(c.tunnels.size());

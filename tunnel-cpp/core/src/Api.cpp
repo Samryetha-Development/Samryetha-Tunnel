@@ -12,97 +12,114 @@ Api::Api(QObject *parent) : QObject(parent) {
     nam_ = new QNetworkAccessManager(this);
 }
 
-QNetworkRequest Api::makeRequest(const QString &url, const QString &token) {
-    QNetworkRequest req{QUrl(url)};
+void Api::request(const QString &base, const QString &token, const QString &method,
+                  const QString &path, const QJsonObject &body, Callback cb) {
+    QNetworkRequest req{QUrl(base + path)};
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     if (!token.isEmpty())
         req.setRawHeader("Authorization", ("Bearer " + token).toUtf8());
-    return req;
-}
 
-void Api::postJson(const QString &url, const QJsonObject &body, const QString &token,
-                   std::function<void(const QJsonObject &)> ok,
-                   std::function<void(const QString &)> err) {
-    QNetworkRequest req = makeRequest(url, token);
-    QNetworkReply *reply =
-        nam_->post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [reply, ok, err, this]() {
+    const QByteArray payload =
+        body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
+
+    QNetworkReply *reply = nullptr;
+    const QString m = method.toUpper();
+    if (m == "GET")
+        reply = nam_->get(req);
+    else if (m == "POST")
+        reply = nam_->post(req, payload);
+    else if (m == "DELETE")
+        reply = nam_->sendCustomRequest(req, "DELETE", payload);
+    else
+        reply = nam_->sendCustomRequest(req, m.toUtf8(), payload);
+
+    connect(reply, &QNetworkReply::finished, this, [reply, cb]() {
         const QByteArray data = reply->readAll();
-        const int httpStatus =
-            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QString netErr = reply->errorString();
+        const bool netFail = (reply->error() != QNetworkReply::NoError) && status == 0;
         reply->deleteLater();
+
         const auto doc = QJsonDocument::fromJson(data);
-        const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
-        if (reply->error() != QNetworkReply::NoError && httpStatus == 0) {
-            err(reply->errorString());
+        QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+        if (netFail) {
+            cb(false, obj, netErr);
             return;
         }
-        if (!obj.isEmpty() && obj.contains("error") && httpStatus >= 400) {
-            err(obj.value("error").toString());
+        if (status >= 400) {
+            const QString msg = obj.value("error").toString(
+                QStringLiteral("HTTP %1").arg(status));
+            cb(false, obj, msg);
             return;
         }
-        ok(obj);
+        cb(true, obj, QString());
     });
 }
+
+// ---------------- 兼容旧接口 ----------------
 
 void Api::getConfig(const QString &httpBase) {
-    QNetworkReply *reply = nam_->get(makeRequest(httpBase + "/auth/config"));
-    connect(reply, &QNetworkReply::finished, this, [reply, this]() {
-        const auto doc = QJsonDocument::fromJson(reply->readAll());
-        reply->deleteLater();
-        if (doc.isObject())
-            emit configReceived(doc.object());
-        else
-            emit failed(QStringLiteral("无法获取 /auth/config"));
-    });
+    request(httpBase, QString(), "GET", "/auth/config", {},
+            [this](bool ok, const QJsonObject &o, const QString &e) {
+                if (ok)
+                    emit configReceived(o);
+                else
+                    emit failed(e);
+            });
 }
 
 void Api::deviceStart(const QString &httpBase) {
-    postJson(httpBase + "/auth/device/start", {},
-             {}, [this](const QJsonObject &o) {
-                 emit deviceCodeReceived(o.value("user_code").toString(),
-                                         o.value("verification_uri").toString(),
-                                         o.value("device_code").toString(),
-                                         o.value("interval").toInt(5));
-             },
-             [this](const QString &e) { emit failed(e); });
+    request(httpBase, QString(), "POST", "/auth/device/start", {},
+            [this](bool ok, const QJsonObject &o, const QString &e) {
+                if (!ok) {
+                    emit failed(e);
+                    return;
+                }
+                emit deviceCodeReceived(o.value("user_code").toString(),
+                                        o.value("verification_uri").toString(),
+                                        o.value("device_code").toString(),
+                                        o.value("interval").toInt(5));
+            });
 }
 
 void Api::devicePoll(const QString &httpBase, const QString &deviceCode) {
     QJsonObject body;
     body["device_code"] = deviceCode;
-    postJson(httpBase + "/auth/device/poll", body, {},
-             [this](const QJsonObject &o) {
-                 const QString status = o.value("status").toString();
-                 if (status == "ok")
-                     emit tokenReceived(o.value("token").toString(), o.value("user").toObject());
-                 else if (status == "error")
-                     emit failed(o.value("error").toString() + " " +
-                                 o.value("description").toString());
-             },
-             [this](const QString &e) { emit failed(e); });
+    request(httpBase, QString(), "POST", "/auth/device/poll", body,
+            [this](bool ok, const QJsonObject &o, const QString &e) {
+                if (!ok) {
+                    emit failed(e);
+                    return;
+                }
+                const QString st = o.value("status").toString();
+                if (st == "ok")
+                    emit tokenReceived(o.value("token").toString(), o.value("user").toObject());
+                else if (st == "error")
+                    emit failed(o.value("error").toString() + " " +
+                                o.value("description").toString());
+            });
 }
 
 void Api::devToken(const QString &httpBase, const QString &email) {
     QJsonObject body;
     body["email"] = email;
-    postJson(httpBase + "/auth/dev-token", body, {},
-             [this](const QJsonObject &o) {
-                 emit tokenReceived(o.value("token").toString(), o.value("user").toObject());
-             },
-             [this](const QString &e) { emit failed(e); });
+    request(httpBase, QString(), "POST", "/auth/dev-token", body,
+            [this](bool ok, const QJsonObject &o, const QString &e) {
+                if (ok)
+                    emit tokenReceived(o.value("token").toString(), o.value("user").toObject());
+                else
+                    emit failed(e);
+            });
 }
 
 void Api::listTunnels(const QString &httpBase, const QString &token) {
-    QNetworkReply *reply = nam_->get(makeRequest(httpBase + "/api/tunnels", token));
-    connect(reply, &QNetworkReply::finished, this, [reply, this]() {
-        const auto doc = QJsonDocument::fromJson(reply->readAll());
-        reply->deleteLater();
-        if (doc.isObject())
-            emit tunnelsReceived(doc.object().value("tunnels").toArray());
-        else
-            emit failed(QStringLiteral("无法获取隧道列表"));
-    });
+    request(httpBase, token, "GET", "/api/tunnels", {},
+            [this](bool ok, const QJsonObject &o, const QString &e) {
+                if (ok)
+                    emit tunnelsReceived(o.value("tunnels").toArray());
+                else
+                    emit failed(e);
+            });
 }
 
 } // namespace tunnel

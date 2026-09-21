@@ -4,6 +4,7 @@
 
 class QLabel;
 class QListWidget;
+class QListWidgetItem;
 class QStackedWidget;
 class QTimer;
 
@@ -22,6 +23,7 @@ public:
 
 private slots:
     void refreshStatus();
+    void updateAdminVisibility();
 
 private:
     AppState *st_;
@@ -29,6 +31,7 @@ private:
     QLabel *statusSub_;
     QLabel *statusDot_;
     QListWidget *tunnelList_;
+    QListWidgetItem *adminItem_ = nullptr;
     QStackedWidget *stack_;
     QTimer *tick_;
 };

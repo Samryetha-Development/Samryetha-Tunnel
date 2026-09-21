@@ -28,6 +28,7 @@ private:
     QLineEdit *token_;
     QLineEdit *clientId_;
     QLineEdit *base_;
+    QLineEdit *apiBase_;
     QCheckBox *autoReconnect_;
     QLabel *authStatus_;
     QTableWidget *tunnelTable_;
