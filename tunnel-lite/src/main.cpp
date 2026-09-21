@@ -958,6 +958,10 @@ static void usage() {
 }
 
 int main(int argc, char **argv) {
+#ifndef _WIN32
+    // 网络写已关闭连接时不要被 SIGPIPE 杀掉（OpenSSL 尤其容易触发）
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
     if (argc > 1) {
         const std::string first = argv[1];
         if (first == "api")

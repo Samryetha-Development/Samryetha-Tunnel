@@ -56,7 +56,7 @@ UsagePage::UsagePage(AppState *st, QWidget *parent) : QWidget(parent), st_(st) {
 void UsagePage::refresh() {
     if (st_->config().apiToken.isEmpty())
         return;
-    st_->api()->request(st_->config().effectiveApiBase(), st_->config().apiToken, "GET",
+    st_->mgmt("GET",
                         "/api/usage", {},
                         [this](bool ok, const QJsonObject &o, const QString &) {
                             if (!ok)

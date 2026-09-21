@@ -12,6 +12,7 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDateTime>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QTextStream>
 #include <QTimer>
@@ -78,9 +79,11 @@ int main(int argc, char **argv) {
     const QCommandLineOption optDevice("device-login", "用 SSO 设备码登录");
     const QCommandLineOption optNoReconnect("no-reconnect", "关闭断线自动重连");
     const QCommandLineOption optSave("save-config", "把当前配置保存到文件后退出", "file");
+    const QCommandLineOption optMgmt("mgmt", "连接后执行管理请求(GET)并退出", "path");
+    const QCommandLineOption optMgmtPost("mgmt-post", "连接后执行管理请求: PATH JSON", "spec");
 
     parser.addOptions({optServer, optToken, optClientId, optBase, optConfig, optTunnel,
-                       optDevToken, optDevice, optNoReconnect, optSave});
+                       optDevToken, optDevice, optNoReconnect, optSave, optMgmt, optMgmtPost});
     parser.process(app);
 
     ClientConfig cfg;
@@ -147,6 +150,33 @@ int main(int argc, char **argv) {
                          for (const auto &t : list)
                              print("ok", t.tunnelId, QStringLiteral("公网地址 %1").arg(t.publicUrl));
                      });
+    // 管理请求模式：连接成功后发一条 mgmt，打印结果后退出
+    if (parser.isSet(optMgmt) || parser.isSet(optMgmtPost)) {
+        const bool post = parser.isSet(optMgmtPost);
+        QString mpath, mjson;
+        if (post) {
+            const QString spec = parser.value(optMgmtPost);
+            const int sp = spec.indexOf(' ');
+            mpath = sp < 0 ? spec : spec.left(sp);
+            mjson = sp < 0 ? QStringLiteral("{}") : spec.mid(sp + 1);
+        } else {
+            mpath = parser.value(optMgmt);
+        }
+        QObject::connect(&client, &Client::stateChanged, &app, [&client, mpath, mjson, post, &app](const QString &st) {
+            if (st != QLatin1String("connected"))
+                return;
+            const QJsonObject body = post ? QJsonDocument::fromJson(mjson.toUtf8()).object() : QJsonObject();
+            client.mgmtRequest(post ? "POST" : "GET", mpath, body,
+                               [&app](bool ok, const QJsonObject &o, const QString &e) {
+                                   if (ok)
+                                       print("ok", "mgmt", QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact)));
+                                   else
+                                       print("err", "mgmt", e);
+                                   QCoreApplication::exit(ok ? 0 : 1);
+                               });
+        });
+    }
+
     QObject::connect(&client, &Client::requestFinished, &app,
                      [](const QString &id, int status, qint64 bytes, int ms) {
                          print("info", id,

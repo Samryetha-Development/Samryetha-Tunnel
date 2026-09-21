@@ -60,7 +60,7 @@ TokensPage::TokensPage(AppState *st, QWidget *parent) : QWidget(parent), st_(st)
                                                             : name_->text().trimmed();
         QJsonObject body;
         body["name"] = n;
-        st_->api()->request(st_->config().effectiveApiBase(), st_->config().apiToken, "POST",
+        st_->mgmt("POST",
                             "/api/tokens", body,
                             [this](bool ok, const QJsonObject &o, const QString &e) {
                                 if (!ok) {
@@ -85,7 +85,7 @@ void TokensPage::refresh() {
         table_->setRowCount(0);
         return;
     }
-    st_->api()->request(st_->config().effectiveApiBase(), st_->config().apiToken, "GET",
+    st_->mgmt("GET",
                         "/api/tokens", {},
                         [this](bool ok, const QJsonObject &o, const QString &e) {
                             if (!ok) {
@@ -109,8 +109,7 @@ void TokensPage::refresh() {
                                                               QStringLiteral("确定吊销该令牌？"))
                                         != QMessageBox::Yes)
                                         return;
-                                    st_->api()->request(st_->config().effectiveApiBase(),
-                                                        st_->config().apiToken, "DELETE",
+                                    st_->mgmt("DELETE",
                                                         QStringLiteral("/api/tokens/%1").arg(id), {},
                                                         [this](bool ok2, const QJsonObject &, const QString &e2) {
                                                             if (!ok2)

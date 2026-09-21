@@ -51,6 +51,7 @@ enum class MsgType {
     ClientChunk,
     End,
     Abort,
+    MgmtResp,
 };
 
 struct ParsedMsg {
@@ -61,6 +62,10 @@ struct ParsedMsg {
     OpenStreamMsg openStream;
     quint64 streamId = 0;
     QByteArray chunk;
+    // mgmt_resp
+    quint64 reqId = 0;
+    int status = 0;
+    QByteArray respBody;
 };
 
 QString buildRegister(const QString &clientId, const QList<TunnelDef> &tunnels);
@@ -71,6 +76,9 @@ QString buildEnd(quint64 streamId);
 QString buildAbort(quint64 streamId, const QString &reason);
 
 ParsedMsg parseServerMessage(const QString &json);
+
+/// 管理请求帧：走控制通道，无需公网管理 API
+QString buildMgmt(quint64 reqId, const QString &method, const QString &path, const QByteArray &body);
 
 } // namespace tunnel
 

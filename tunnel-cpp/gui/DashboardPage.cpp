@@ -215,7 +215,7 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
         }
     });
     connect(visitor, &QPushButton::clicked, this, [this, tid = t.tunnelId]() {
-        st_->api()->request(st_->config().effectiveApiBase(), st_->config().apiToken, "GET",
+        st_->mgmt("GET",
                             "/api/tunnels", {},
                             [this, tid](bool ok, const QJsonObject &o, const QString &e) {
                                 if (!ok) {
@@ -237,8 +237,7 @@ QWidget *DashboardPage::buildTunnelCard(int index, bool connected) {
                                     return;
                                 QJsonObject body;
                                 body["visitor_auth"] = dlg.result();
-                                st_->api()->request(st_->config().effectiveApiBase(),
-                                                    st_->config().apiToken, "PATCH",
+                                st_->mgmt("PATCH",
                                                     QStringLiteral("/api/tunnels/%1").arg(tid), body,
                                                     [this](bool ok2, const QJsonObject &, const QString &e2) {
                                                         if (!ok2)

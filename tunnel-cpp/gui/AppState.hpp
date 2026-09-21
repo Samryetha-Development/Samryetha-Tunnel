@@ -55,6 +55,9 @@ public:
     void refreshMe();
     /// 追加一条 GUI 日志
     void addLog(const QString &level, const QString &source, const QString &message);
+    /// 管理请求：优先走控制通道（客户端即管理端），未连接时回退到 HTTP API
+    void mgmt(const QString &method, const QString &path, const QJsonObject &body,
+              tunnel::Client::MgmtCallback cb);
 
     const QVector<LogEntry> &logs() const { return logs_; }
     const QVector<RequestEvent> &events() const { return events_; }

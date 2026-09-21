@@ -76,6 +76,16 @@ QString buildAbort(quint64 streamId, const QString &reason) {
     return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
 }
 
+QString buildMgmt(quint64 reqId, const QString &method, const QString &path, const QByteArray &body) {
+    QJsonObject o;
+    o["type"] = QStringLiteral("mgmt");
+    o["req_id"] = static_cast<double>(reqId);
+    o["method"] = method;
+    o["path"] = path;
+    o["body_b64"] = QString::fromLatin1(body.toBase64());
+    return QString::fromUtf8(QJsonDocument(o).toJson(QJsonDocument::Compact));
+}
+
 ParsedMsg parseServerMessage(const QString &json) {
     ParsedMsg m;
     const auto doc = QJsonDocument::fromJson(json.toUtf8());
@@ -136,6 +146,11 @@ ParsedMsg parseServerMessage(const QString &json) {
     } else if (type == "end") {
         m.type = MsgType::End;
         m.streamId = static_cast<quint64>(o.value("stream_id").toDouble());
+    } else if (type == "mgmt_resp") {
+        m.type = MsgType::MgmtResp;
+        m.reqId = static_cast<quint64>(o.value("req_id").toDouble());
+        m.status = o.value("status").toInt();
+        m.respBody = unb64(o.value("body_b64").toString());
     } else if (type == "abort") {
         m.type = MsgType::Abort;
         m.streamId = static_cast<quint64>(o.value("stream_id").toDouble());

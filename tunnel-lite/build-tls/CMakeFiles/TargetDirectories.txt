@@ -1,0 +1,3 @@
+/Users/tyc/Documents/AI/tunnel/tunnel-lite/build-tls/CMakeFiles/tunnel-lite.dir
+/Users/tyc/Documents/AI/tunnel/tunnel-lite/build-tls/CMakeFiles/edit_cache.dir
+/Users/tyc/Documents/AI/tunnel/tunnel-lite/build-tls/CMakeFiles/rebuild_cache.dir

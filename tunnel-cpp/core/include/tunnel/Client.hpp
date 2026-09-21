@@ -5,8 +5,11 @@
 
 #include <QElapsedTimer>
 #include <QHash>
+#include <QJsonObject>
 #include <QObject>
 #include <QTimer>
+
+#include <functional>
 
 class QNetworkAccessManager;
 class QWebSocket;
@@ -26,6 +29,11 @@ public:
 
     void start();
     void stop();
+
+    /// 管理请求（Token/隧道/访客鉴权/用量/管理员）通过同一条控制通道执行
+    using MgmtCallback = std::function<void(bool, const QJsonObject &, const QString &)>;
+    void mgmtRequest(const QString &method, const QString &path, const QJsonObject &body,
+                     MgmtCallback cb);
     bool isConnected() const { return connected_; }
     QString serverHost() const { return cfg_.serverUrl; }
 
@@ -60,6 +68,8 @@ private:
     bool connected_ = false;
     QMap<QString, QString> localMap_;
     QHash<quint64, StreamState> streams_;
+    quint64 nextMgmtId_ = 0;
+    QHash<quint64, MgmtCallback> mgmtPending_;
 };
 
 } // namespace tunnel

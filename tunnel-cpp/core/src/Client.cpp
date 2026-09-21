@@ -2,6 +2,7 @@
 #include "tunnel/Forwarder.hpp"
 
 #include <QAbstractSocket>
+#include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QUrl>
@@ -118,6 +119,19 @@ void Client::handleMessage(const QString &json) {
             it->fwd->writeFromRemote(m.chunk);
         break;
     }
+    case MsgType::MgmtResp: {
+        const auto cb = mgmtPending_.take(m.reqId);
+        if (cb) {
+            const auto doc = QJsonDocument::fromJson(m.respBody);
+            const QJsonObject obj = doc.isObject() ? doc.object() : QJsonObject();
+            const bool ok = m.status < 400;
+            const QString err =
+                ok ? QString()
+                   : (obj.value("error").toString(QStringLiteral("HTTP %1").arg(m.status)));
+            cb(ok, obj, err);
+        }
+        break;
+    }
     case MsgType::CloseStream: {
         auto it = streams_.find(m.streamId);
         if (it != streams_.end() && it->fwd)
@@ -127,6 +141,19 @@ void Client::handleMessage(const QString &json) {
     default:
         break;
     }
+}
+
+void Client::mgmtRequest(const QString &method, const QString &path, const QJsonObject &body,
+                         MgmtCallback cb) {
+    if (!connected_ || !ws_ || ws_->state() != QAbstractSocket::ConnectedState) {
+        cb(false, {}, QStringLiteral("控制通道未连接"));
+        return;
+    }
+    const quint64 id = ++nextMgmtId_;
+    mgmtPending_.insert(id, cb);
+    const QByteArray payload =
+        body.isEmpty() ? QByteArray() : QJsonDocument(body).toJson(QJsonDocument::Compact);
+    sendText(buildMgmt(id, method.toUpper(), path, payload));
 }
 
 void Client::onOpenStream(const OpenStreamMsg &os) {

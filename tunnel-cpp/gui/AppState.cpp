@@ -24,8 +24,11 @@ AppState::AppState(QObject *parent) : QObject(parent) {
         emit logsChanged();
     });
     connect(client_, &Client::stateChanged, this, [this](const QString &s) {
-        if (s == QLatin1String("connected"))
+        if (s == QLatin1String("connected")) {
             connectedAt_ = QDateTime::currentDateTime();
+            // 连上后通过控制通道拉取身份（决定是否显示「管理」）
+            refreshMe();
+        }
         if (s == QLatin1String("disconnected"))
             connectedAt_ = QDateTime();
         emit stateChanged();
@@ -77,12 +80,20 @@ void AppState::addLog(const QString &level, const QString &source, const QString
     emit logsChanged();
 }
 
+void AppState::mgmt(const QString &method, const QString &path, const QJsonObject &body,
+                    tunnel::Client::MgmtCallback cb) {
+    if (client_->isConnected()) {
+        client_->mgmtRequest(method, path, body, cb);
+        return;
+    }
+    api_->request(cfg_.effectiveApiBase(), cfg_.apiToken, method, path, body, cb);
+}
+
 void AppState::refreshMe() {
     if (cfg_.apiToken.isEmpty())
         return;
-    api_->request(cfg_.effectiveApiBase(), cfg_.apiToken, QStringLiteral("GET"),
-                  QStringLiteral("/auth/me"), {},
-                  [this](bool ok, const QJsonObject &o, const QString &e) {
+    mgmt(QStringLiteral("GET"), QStringLiteral("/auth/me"), {},
+         [this](bool ok, const QJsonObject &o, const QString &e) {
                       if (!ok) {
                           addLog(QStringLiteral("warn"), QStringLiteral("api"),
                                  QStringLiteral("获取用户信息失败: ") + e);

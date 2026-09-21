@@ -89,7 +89,7 @@ void AdminPage::refresh() {
     const QString base = st_->config().effectiveApiBase();
     const QString tok = st_->config().apiToken;
 
-    st_->api()->request(base, tok, "GET", "/api/admin/overview", {},
+    st_->mgmt("GET", "/api/admin/overview", {},
                         [this](bool ok, const QJsonObject &o, const QString &) {
                             if (!ok) return;
                             vUsers_->setText(QString::number(o.value("users").toInt()));
@@ -98,7 +98,7 @@ void AdminPage::refresh() {
                             vReqs_->setText(QString::number(o.value("requests_today").toInt()));
                         });
 
-    st_->api()->request(base, tok, "GET", "/api/admin/users", {},
+    st_->mgmt("GET", "/api/admin/users", {},
                         [this, base, tok](bool ok, const QJsonObject &o, const QString &) {
                             if (!ok) return;
                             const auto arr = o.value("users").toArray();
@@ -131,8 +131,7 @@ void AdminPage::refresh() {
                                 hb->addWidget(quotaBtn);
                                 hb->addWidget(disBtn);
                                 auto patch = [this, id](const QJsonObject &b) {
-                                    st_->api()->request(st_->config().effectiveApiBase(),
-                                                        st_->config().apiToken, "PATCH",
+                                    st_->mgmt("PATCH",
                                                         QStringLiteral("/api/admin/users/%1").arg(id), b,
                                                         [this](bool ok2, const QJsonObject &, const QString &e2) {
                                                             if (!ok2) {
@@ -165,7 +164,7 @@ void AdminPage::refresh() {
                             }
                         });
 
-    st_->api()->request(base, tok, "GET", "/api/admin/tunnels", {},
+    st_->mgmt("GET", "/api/admin/tunnels", {},
                         [this, base, tok](bool ok, const QJsonObject &o, const QString &) {
                             if (!ok) return;
                             const auto arr = o.value("tunnels").toArray();
@@ -183,8 +182,7 @@ void AdminPage::refresh() {
                                 connect(btn, &QPushButton::clicked, this, [this, id, disabled]() {
                                     QJsonObject b;
                                     b["disabled"] = !disabled;
-                                    st_->api()->request(st_->config().effectiveApiBase(),
-                                                        st_->config().apiToken, "PATCH",
+                                    st_->mgmt("PATCH",
                                                         QStringLiteral("/api/admin/tunnels/%1").arg(id), b,
                                                         [this](bool ok2, const QJsonObject &, const QString &) {
                                                             if (ok2) refresh();
@@ -194,7 +192,7 @@ void AdminPage::refresh() {
                             }
                         });
 
-    st_->api()->request(base, tok, "GET", "/api/admin/audit?limit=80", {},
+    st_->mgmt("GET", "/api/admin/audit?limit=80", {},
                         [this](bool ok, const QJsonObject &o, const QString &) {
                             if (!ok) return;
                             const auto arr = o.value("audit").toArray();
