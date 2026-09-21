@@ -648,11 +648,216 @@ static bool runOnce(const std::string &serverIn, const std::string &token, const
     return true;
 }
 
+// ---------------- 管理 API（不再依赖网页控制台）----------------
+
+static bool httpJson(const std::string &base, const std::string &token, const std::string &method,
+                     const std::string &path, const std::string &body, HttpResponse &out,
+                     std::string *err) {
+    std::vector<std::pair<std::string, std::string>> hs = {{"Content-Type", "application/json"}};
+    if (!token.empty())
+        hs.push_back({"Authorization", "Bearer " + token});
+    return httpRequest(base + path, method, hs, body, out, err);
+}
+
+static void printJson(const std::string &body) {
+    J j = J::parse(body);
+    std::cout << j.dump() << "\n";
+}
+
+static int apiFail(const HttpResponse &r) {
+    std::cerr << "HTTP " << r.status << ": " << r.body << "\n";
+    return 1;
+}
+
+static void apiUsage() {
+    std::cout <<
+        "tunnel-lite api - 管理命令（全部操作无需网页控制台）\n\n"
+        "通用: --base <http(s)://host[:port]>  --token <API Token>\n\n"
+        "  me                                  当前用户\n"
+        "  token-list                          列出 API Token\n"
+        "  token-create <名称>                 新建（明文只显示一次）\n"
+        "  token-revoke <id>                   吊销\n"
+        "  tunnel-list                         我的隧道\n"
+        "  tunnel-disable <隧道ID> / tunnel-enable <隧道ID>\n"
+        "  tunnel-rm <隧道ID>\n"
+        "  visitor-auth <隧道ID> [--basic 用户:密码] [--ips 1.2.3.4,10.0.0.0/8]\n"
+        "  visitor-auth-clear <隧道ID>\n"
+        "  usage                               今日用量与配额\n"
+        "  admin-users                         用户列表（需管理员）\n"
+        "  admin-user-patch <id> [--role user|admin] [--disable|--enable]\n"
+        "                        [--max-tunnels N] [--daily-bytes N]\n"
+        "  admin-tunnels / admin-tunnel-disable <id> / admin-tunnel-enable <id>\n"
+        "  admin-audit [--limit N]\n\n"
+        "登录（获取 Token）:\n"
+        "  tunnel-lite login --base URL --dev <邮箱>       # dev 模式\n"
+        "  tunnel-lite login --base URL --device           # SSO 设备码\n";
+}
+
+static int loginMain(int argc, char **argv) {
+    std::string base, dev, token;
+    bool device = false;
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&](std::string &out) { if (i + 1 < argc) out = argv[++i]; };
+        if (a == "--base") next(base);
+        else if (a == "--dev") next(dev);
+        else if (a == "--device") device = true;
+        else if (a == "-h" || a == "--help") { apiUsage(); return 0; }
+    }
+    if (base.empty()) { std::cerr << "缺少 --base\n"; return 2; }
+
+    if (!dev.empty()) {
+        HttpResponse r; std::string err;
+        if (!httpJson(base, "", "POST", "/auth/dev-token", "{\"email\":\"" + dev + "\"}", r, &err)) {
+            std::cerr << "请求失败: " << err << "\n"; return 1;
+        }
+        if (r.status != 200) return apiFail(r);
+        J j = J::parse(r.body);
+        token = j.str("token");
+        std::cout << token << "\n";
+        std::cerr << "已登录: " << j.at("user").str("email") << "（把上面这行保存为 API Token）\n";
+        return 0;
+    }
+    if (device) {
+        HttpResponse r; std::string err;
+        if (!httpJson(base, "", "POST", "/auth/device/start", "{}", r, &err) || r.status != 200) {
+            std::cerr << "设备码请求失败: " << (err.empty() ? r.body : err) << "\n"; return 1;
+        }
+        J s = J::parse(r.body);
+        const std::string code = s.str("device_code");
+        const int interval = (int)s.numv("interval", 5);
+        std::cerr << "请打开 " << s.str("verification_uri") << " 输入代码 " << s.str("user_code") << "\n";
+        for (;;) {
+            std::this_thread::sleep_for(std::chrono::seconds(interval > 0 ? interval : 5));
+            HttpResponse p;
+            if (!httpJson(base, "", "POST", "/auth/device/poll", "{\"device_code\":\"" + code + "\"}", p, &err)) {
+                std::cerr << "轮询失败: " << err << "\n"; return 1;
+            }
+            J j = J::parse(p.body);
+            const std::string st = j.str("status");
+            if (st == "ok") {
+                std::cout << j.str("token") << "\n";
+                std::cerr << "已登录: " << j.at("user").str("email") << "\n";
+                return 0;
+            }
+            if (st == "error") { std::cerr << "登录失败: " << j.str("error") << "\n"; return 1; }
+            std::cerr << "等待授权…\n";
+        }
+    }
+    std::cerr << "请指定 --dev <邮箱> 或 --device\n";
+    return 2;
+}
+
+static int apiMain(int argc, char **argv) {
+    std::string base, token, cmd, arg, basic, ips;
+    long long limit = 100, maxTunnels = -1, dailyBytes = -1;
+    std::string role; int disableState = -1;
+    std::vector<std::string> pos;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string a = argv[i];
+        auto next = [&](std::string &out) { if (i + 1 < argc) out = argv[++i]; };
+        if (a == "--base") next(base);
+        else if (a == "--token") next(token);
+        else if (a == "--limit") { std::string v; next(v); limit = std::atoll(v.c_str()); }
+        else if (a == "--basic") next(basic);
+        else if (a == "--ips") next(ips);
+        else if (a == "--role") next(role);
+        else if (a == "--max-tunnels") { std::string v; next(v); maxTunnels = std::atoll(v.c_str()); }
+        else if (a == "--daily-bytes") { std::string v; next(v); dailyBytes = std::atoll(v.c_str()); }
+        else if (a == "--disable") disableState = 1;
+        else if (a == "--enable") disableState = 0;
+        else if (a == "-h" || a == "--help") { apiUsage(); return 0; }
+        else pos.push_back(a);
+    }
+    if (pos.empty()) { apiUsage(); return 2; }
+    cmd = pos[0];
+    if (pos.size() > 1) arg = pos[1];
+    if (base.empty()) { std::cerr << "缺少 --base（如 http://127.0.0.1:18080 或 https://frp.samryetha.com/tunnel-admin）\n"; return 2; }
+
+    auto call = [&](const std::string &method, const std::string &path, const std::string &body) -> int {
+        HttpResponse r; std::string err;
+        if (!httpJson(base, token, method, path, body, r, &err)) { std::cerr << "请求失败: " << err << "\n"; return 1; }
+        if (r.status >= 400) return apiFail(r);
+        if (!r.body.empty()) printJson(r.body);
+        else std::cout << "ok\n";
+        return 0;
+    };
+
+    if (cmd == "me") return call("GET", "/auth/me", "");
+    if (cmd == "token-list") return call("GET", "/api/tokens", "");
+    if (cmd == "token-create") {
+        if (arg.empty()) { std::cerr << "用法: token-create <名称>\n"; return 2; }
+        return call("POST", "/api/tokens", "{\"name\":\"" + arg + "\"}");
+    }
+    if (cmd == "token-revoke") return call("DELETE", "/api/tokens/" + arg, "");
+    if (cmd == "tunnel-list") return call("GET", "/api/tunnels", "");
+    if (cmd == "tunnel-disable") return call("PATCH", "/api/tunnels/" + arg, "{\"disabled\":true}");
+    if (cmd == "tunnel-enable") return call("PATCH", "/api/tunnels/" + arg, "{\"disabled\":false}");
+    if (cmd == "tunnel-rm") return call("DELETE", "/api/tunnels/" + arg, "");
+    if (cmd == "visitor-auth") {
+        if (arg.empty()) { std::cerr << "用法: visitor-auth <隧道ID> [--basic u:p] [--ips ...]\n"; return 2; }
+        std::string va = "{";
+        bool first = true;
+        if (!basic.empty()) {
+            auto c = basic.find(':');
+            if (c == std::string::npos) { std::cerr << "--basic 需要 用户:密码\n"; return 2; }
+            va += "\"basic\":{\"user\":\"" + basic.substr(0, c) + "\",\"pass\":\"" + basic.substr(c + 1) + "\"}";
+            first = false;
+        }
+        std::string body = "{\"visitor_auth\":" + va;  // 结尾在下面补齐
+        if (!ips.empty()) {
+            if (!first) body += ",";
+            std::string arr = "[";
+            std::stringstream ss(ips);
+            std::string it; bool f2 = true;
+            while (std::getline(ss, it, ',')) {
+                if (it.empty()) continue;
+                if (!f2) arr += ",";
+                arr += "\"" + it + "\""; f2 = false;
+            }
+            arr += "]";
+            body += "\"ips\":" + arr;
+        }
+        body += "}}";
+        return call("PATCH", "/api/tunnels/" + arg, body);
+    }
+    if (cmd == "visitor-auth-clear") return call("PATCH", "/api/tunnels/" + arg, "{\"visitor_auth\":{}}");
+    if (cmd == "usage") return call("GET", "/api/usage", "");
+    if (cmd == "admin-users") return call("GET", "/api/admin/users", "");
+    if (cmd == "admin-user-patch") {
+        if (arg.empty()) { std::cerr << "用法: admin-user-patch <id> [--role ..] [--disable] [--max-tunnels N] [--daily-bytes N]\n"; return 2; }
+        std::string body = "{";
+        bool first = true;
+        auto add = [&](const std::string &kv) { if (!first) body += ","; body += kv; first = false; };
+        if (!role.empty()) add("\"role\":\"" + role + "\"");
+        if (disableState >= 0) add(std::string("\"disabled\":") + (disableState ? "true" : "false"));
+        if (maxTunnels >= 0) add("\"max_tunnels\":" + std::to_string(maxTunnels));
+        if (dailyBytes >= 0) add("\"daily_bytes\":" + std::to_string(dailyBytes));
+        body += "}";
+        return call("PATCH", "/api/admin/users/" + arg, body);
+    }
+    if (cmd == "admin-tunnels") return call("GET", "/api/admin/tunnels", "");
+    if (cmd == "admin-tunnel-disable") return call("PATCH", "/api/admin/tunnels/" + arg, "{\"disabled\":true}");
+    if (cmd == "admin-tunnel-enable") return call("PATCH", "/api/admin/tunnels/" + arg, "{\"disabled\":false}");
+    if (cmd == "admin-audit") return call("GET", "/api/admin/audit?limit=" + std::to_string(limit), "");
+    if (cmd == "admin-overview") return call("GET", "/api/admin/overview", "");
+
+    std::cerr << "未知命令: " << cmd << "\n";
+    apiUsage();
+    return 2;
+}
+
 // ---------------- main ----------------
 
 static void usage() {
     std::cout << "tunnel-lite " << kVersion << " - 轻量跨平台客户端（无 Qt）\n\n"
-        "用法:\n"
+        "子命令:\n"
+        "  (默认)      建立隧道（见下）\n"
+        "  login       获取 API Token（--dev 邮箱 / --device 设备码）\n"
+        "  api         管理命令：Token/隧道/访客鉴权/用量/管理员（无网页控制台）\n"
+        "  api --help  查看全部管理命令\n\n"
+        "建立隧道:\n"
         "  tunnel-lite --server <ws://|wss://.../tunnel> [--token T | --dev-token EMAIL]\n"
         "              [--client-id ID] [--config file.json] [--no-reconnect]\n"
         "              [--proto json|binary] [--isolate]\n"
@@ -669,6 +874,13 @@ static void usage() {
 }
 
 int main(int argc, char **argv) {
+    if (argc > 1) {
+        const std::string first = argv[1];
+        if (first == "api")
+            return apiMain(argc, argv);
+        if (first == "login")
+            return loginMain(argc, argv);
+    }
     std::string server, token, devToken, clientId = "lite", configPath;
     std::vector<TunnelCfg> tunnels;
     bool noReconnect = false;

@@ -78,10 +78,14 @@ pub async fn visitor_handler(
     let req_headers = req.headers().clone();
 
     let Some((target, forward_path)) = state.registry.lookup(&host, &path, &state.cfg.base_domain).await else {
-        // 主域名根路径 / 留给 Web 控制台；子域名根路径则正常查隧道
+        // 不提供网页控制台：所有管理操作请用 GUI / CLI
         let hostname = host.split(':').next().unwrap_or(&host).to_lowercase();
-        if hostname == state.cfg.base_domain && (path == "/" || path.starts_with("/_console")) {
-            return crate::web::console_or_redirect(&state, &req_headers).await;
+        if hostname == state.cfg.base_domain && path == "/" {
+            return (
+                StatusCode::OK,
+                "samryetha tunnel server\n\n本服务不提供网页控制台。\n请使用 GUI 或 CLI 管理（/auth/*、/api/*）。\n",
+            )
+                .into_response();
         }
         return (StatusCode::NOT_FOUND, "no such tunnel (check subdomain/path)").into_response();
     };

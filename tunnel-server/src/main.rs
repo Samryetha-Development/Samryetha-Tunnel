@@ -13,7 +13,6 @@ mod routes_auth;
 mod routes_visitor;
 mod routes_ws;
 mod util;
-mod web;
 
 use axum::routing::get;
 use axum::Router;
