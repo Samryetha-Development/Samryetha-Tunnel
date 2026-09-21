@@ -33,6 +33,17 @@ PORT=18080 SERVER_TOKEN=换成强随机串 BASE_DOMAIN=frp.xxx.com cargo run --r
 
 Caddy 配置见 `tunnel-server/Caddyfile.example`（主域名 + 泛域名反代到 `127.0.0.1:18080`）。
 
+**管理（CLI / GUI，走隧道，无需公网管理 API）**：
+
+```bash
+# 客户端即管理端：管理指令走同一条隧道连接
+tunnel-lite api --server wss://frp.samryetha.com/tunnel --token <T> me
+tunnel-lite api --server wss://frp.samryetha.com/tunnel --token <T> token-create macbook
+tunnel-lite api --server wss://frp.samryetha.com/tunnel --token <T> tunnel-list
+tunnel-lite api --server wss://frp.samryetha.com/tunnel --token <T> visitor-auth web --basic u:p
+tunnel-lite api --server wss://frp.samryetha.com/tunnel --token <T> admin-users   # 仅管理员
+```
+
 **客户端（C++，跨平台）**：
 
 ```bash

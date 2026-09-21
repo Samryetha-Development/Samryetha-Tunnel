@@ -40,7 +40,13 @@ cargo run --release
 
 `/` 只返回一行纯文本说明（没有网页控制台）。
 
-## 管理方式（CLI / GUI）
+## 管理方式（CLI / GUI，走隧道通道）
+
+管理指令通过**控制通道**（`/tunnel` 这条 WebSocket）执行，服务端**不需要**对外暴露 `/api`。
+客户端既是使用端也是管理端；`/api/admin/*` 只有管理员能调用。
+首次登录用设备码（匿名连接只允许 `/auth/device/*`）。
+
+### CLI / GUI
 
 **CLI**（`tunnel-lite`，无 Qt 依赖）：
 
